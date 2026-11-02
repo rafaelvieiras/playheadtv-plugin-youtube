@@ -71,6 +71,9 @@ const playlistReadAttempts = 25
 
 const playlistReadPause = 10 * time.Millisecond
 
+// requestLogLimit caps the request log file.
+const requestLogLimit = 256 * 1024
+
 // streamMaxConcurrent caps simultaneously remuxing streams: a crossfade needs
 // two, and nothing legitimate needs many more.
 const streamMaxConcurrent = 4
@@ -515,7 +518,25 @@ func (s *streams) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 	http.ServeFile(rec, r, full)
-	fmt.Fprintf(os.Stderr, "stream: %s %s -> %d (%d bytes)\n", r.Method, rest, rec.status, rec.written)
+	requestLog(r, rest, rec.status, rec.written)
+}
+
+// requestLog keeps the last requests in a file next to the streams, so a player
+// failure on a device with no readable log can still be traced: the plugin's own
+// stderr only reaches the host's debug log.
+func requestLog(r *http.Request, path string, status, written int) {
+	name := filepath.Join(os.TempDir(), "playheadtv-yt-requests.log")
+	if info, err := os.Stat(name); err == nil && info.Size() > requestLogLimit {
+		// Bounded: this is a diagnostic, not a journal.
+		_ = os.Truncate(name, 0)
+	}
+	f, err := os.OpenFile(name, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	fmt.Fprintf(f, "%s %s %s -> %d (%d) range=%s\n",
+		time.Now().UTC().Format("15:04:05.000"), r.Method, path, status, written, r.Header.Get("Range"))
 }
 
 // completePlaylist reads a playlist and returns it only when it is whole: the
