@@ -143,12 +143,15 @@ func (s *streams) open(inputs []remuxInput, startAt float64, headers map[string]
 
 	st := &stream{token: token, dir: dir, lastUse: s.clock(), stderr: &tailBuffer{}}
 
-	// -re: produce at playback speed instead of copying as fast as the network
-	// allows. A remux exists to feed a player that is watching now, and a copy
-	// that races ahead would slide its own window past the segments the player
-	// has not fetched yet. It also keeps the disk use of one stream at the window
-	// size instead of the whole item.
-	args := []string{"-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-re"}
+	// Produced as fast as the host can read, not at playback speed (-re). A remux
+	// paced to real time hands the player one segment at a time and puts it
+	// permanently at the edge of the media, where the smallest hiccup leaves it
+	// with nothing to show: the picture stops for a moment every few seconds and
+	// never recovers a cushion. Reading ahead gives the player the whole item
+	// within seconds, which is what makes it smooth, and it is only safe because
+	// the playlist is an event playlist that keeps what it produced (a sliding
+	// window would delete the segments the player had not reached yet).
+	args := []string{"-hide_banner", "-nostdin", "-loglevel", "error", "-y"}
 	args = append(args, headerArgs(headers)...)
 	for _, in := range inputs {
 		// -ss applies to the input that follows it, and input seeking is the
