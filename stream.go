@@ -66,6 +66,11 @@ const hlsSegmentSeconds = 6
 // the requested offset, so this is "however long the site takes to answer".
 const streamReadyTimeout = 60 * time.Second
 
+// playlistReadAttempts bounds how long a half-written playlist is waited for.
+const playlistReadAttempts = 25
+
+const playlistReadPause = 10 * time.Millisecond
+
 // streamMaxConcurrent caps simultaneously remuxing streams: a crossfade needs
 // two, and nothing legitimate needs many more.
 const streamMaxConcurrent = 4
@@ -237,7 +242,9 @@ func (s *streams) start(ctx context.Context, params streamParams) (*process, err
 		// make every player reverse a repackaging it never needed.
 		"-hls_segment_type", "fmp4",
 		"-hls_fmp4_init_filename", "init.mp4",
-		"-hls_flags", "independent_segments",
+		// temp_file: every segment is written under a temporary name and renamed
+		// when complete, so a reader never sees half a segment.
+		"-hls_flags", "independent_segments+temp_file",
 		"-hls_segment_filename", filepath.Join(dir, "%v", "seg%05d.m4s"),
 		filepath.Join(dir, "%v", "index.m3u8"),
 	)
@@ -466,13 +473,33 @@ func (s *streams) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	switch {
-	case strings.HasSuffix(name, ".m3u8"):
+	w.Header().Set("Cache-Control", "no-store")
+	if strings.HasSuffix(name, ".m3u8") {
+		// A playlist is rewritten in place, and a player that reads it mid-write
+		// gets a truncated one: no error it can explain, just "source error" and a
+		// dead stream (reproduced: a channel played ~20s and then failed on a
+		// playlist refresh). Only a complete playlist is served, and a half-written
+		// one is re-read a moment later.
+		body, ok := completePlaylist(full)
+		if !ok {
+			if reason, dead := proc.exited(); dead {
+				w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+				w.WriteHeader(http.StatusGone)
+				_, _ = io.WriteString(w, "remux ended: "+reason)
+				return
+			}
+			http.NotFound(w, r)
+			return
+		}
 		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
-	case strings.HasSuffix(name, ".m4s"), strings.HasSuffix(name, ".mp4"):
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(body)
+		return
+	}
+	if strings.HasSuffix(name, ".m4s") || strings.HasSuffix(name, ".mp4") {
 		w.Header().Set("Content-Type", "video/mp4")
 	}
-	w.Header().Set("Cache-Control", "no-store")
 	if _, err := os.Stat(full); err != nil {
 		if reason, dead := proc.exited(); dead {
 			// 410, not 404: the stream existed and is gone, so a player stops
@@ -489,6 +516,27 @@ func (s *streams) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 	http.ServeFile(rec, r, full)
 	fmt.Fprintf(os.Stderr, "stream: %s %s -> %d (%d bytes)\n", r.Method, rest, rec.status, rec.written)
+}
+
+// completePlaylist reads a playlist and returns it only when it is whole: the
+// remuxer rewrites the file in place, so a read can land in the middle of it. It
+// retries briefly, because the rewrite is short.
+func completePlaylist(path string) ([]byte, bool) {
+	for attempt := 0; attempt < playlistReadAttempts; attempt++ {
+		body, err := os.ReadFile(path)
+		if err != nil {
+			return nil, false
+		}
+		text := string(body)
+		// A variant lists segments; the master lists variants. Both end with a
+		// newline only when they were written to the end.
+		if strings.HasPrefix(text, "#EXTM3U") && strings.HasSuffix(text, "\n") &&
+			(strings.Contains(text, "#EXTINF") || strings.Contains(text, "#EXT-X-STREAM-INF")) {
+			return body, true
+		}
+		time.Sleep(playlistReadPause)
+	}
+	return nil, false
 }
 
 // statusRecorder remembers what a response ended up being, so the log says which
