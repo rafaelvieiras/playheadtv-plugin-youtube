@@ -263,10 +263,10 @@ func TestResolveAsksForWhatTheHostCanPlay(t *testing.T) {
 			t.Fatalf("decode: %v", err)
 		}
 		if result.Mode != modeRemux || !result.Live || !strings.HasPrefix(result.URL, "http://127.0.0.1:") {
-			t.Fatalf("result = %+v, want a loopback playlist marked live", result)
+			t.Fatalf("result = %+v, want a loopback body marked live", result)
 		}
-		if result.Mime != "application/vnd.apple.mpegurl" {
-			t.Errorf("mime = %q", result.Mime)
+		if result.Mime != "video/mp4" {
+			t.Errorf("mime = %q, want one continuous mp4 body", result.Mime)
 		}
 	})
 }
@@ -318,17 +318,14 @@ func TestUnknownMethod(t *testing.T) {
 	}
 }
 
-// writeFakeRemuxer writes a stand-in for the bundled remuxer that produces the
-// smallest thing a player would accept: a playlist with one segment.
+// writeFakeRemuxer writes a stand-in for the bundled remuxer: it writes a few
+// bytes of "media" to stdout and then stays alive like a real remux would.
 func writeFakeRemuxer(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	path := dir + "/fake-remuxer"
 	script := `#!/bin/sh
-for last; do out="$last"; done
-dir=$(dirname "$out")
-printf '#EXTM3U\n#EXT-X-VERSION:6\n#EXT-X-TARGETDURATION:6\n#EXTINF:6.0,\nseg00000.ts\n' > "$out"
-printf 'segment' > "$dir/seg00000.ts"
+printf 'FRAGMENT'
 sleep 30
 `
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {

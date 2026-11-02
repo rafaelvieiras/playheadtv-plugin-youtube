@@ -166,7 +166,8 @@ func (s *server) resolve(raw json.RawMessage) (any, error) {
 	}
 
 	// The fallback, and the only mode where this process touches media: remux
-	// into a bounded HLS window. Never reached unless the host asked for it.
+	// into one continuous fragmented MP4 body. Never reached unless the host
+	// asked for it.
 	if modes[modeRemux] && len(plan.inputs()) > 0 {
 		st, err := s.streams.open(ctx, plan.inputs(), startAt, plan.headers)
 		if err != nil {
@@ -175,7 +176,9 @@ func (s *server) resolve(raw json.RawMessage) (any, error) {
 		return resolveResult{
 			Mode: modeRemux,
 			URL:  s.streams.url(st),
-			Mime: "application/vnd.apple.mpegurl",
+			Mime: "video/mp4",
+			// One continuous body that only ever moves forward: a player must not
+			// try to seek or resume it.
 			Live: true,
 		}, nil
 	}

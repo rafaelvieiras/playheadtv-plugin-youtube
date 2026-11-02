@@ -27,26 +27,28 @@ a small machine (a 2 GB set-top box, a single-board computer).
 
 ## How the stream is shaped
 
-The remux hands the player fragmented MP4 segments in an **event** playlist,
-produced **as fast as the source can be read**, and that combination is not
-arbitrary:
+The remux answers with **one continuous fragmented MP4 body**, not HLS:
 
-- **fragmented MP4, not MPEG-TS.** The sources are fragmented MP4 already. TS
-  would make every player reverse a repackaging it never needed (PES packets,
-  then Annex-B access units), and a segment cut in the middle of a packet makes
-  that reader lose the stream.
-- **an event playlist, not a sliding window.** The stream begins where the host
-  asked for and grows to the end of the item. A sliding live window lists one
-  segment at the moment a player opens it, and a player that follows a live edge
-  has no cushion.
-- **reading ahead, not `-re`.** Pacing a remux to real time leaves the player
-  permanently at the edge of the media: any hiccup empties its buffer and the
-  picture stops for a moment, over and over. Reading ahead gives it the item
-  within seconds. This is only safe because the playlist is `event` and keeps
-  what it produced.
+- **one body, no segments and no playlist.** With `-c copy` the muxer cannot cut
+  where it wants: the video can only be cut on a keyframe and the audio anywhere,
+  so the two tracks of one stream end up with different boundaries and odd
+  declared durations (measured in one stream: 3.0s, 12.28s and 0.13s, with the
+  audio starting seconds after the video). A player reading that through its own
+  HLS extractor stopped a few seconds into every stream with data still buffered —
+  no error, no buffering flag, one frozen picture. A single body has no
+  boundaries to disagree about.
+- **fragmented MP4 with an empty moov.** The first bytes are playable and nothing
+  has to be finished before it can be read.
+- **backpressure, not a pacing flag.** Nothing paces the remux: it writes into the
+  HTTP response, so when the player stops reading the socket fills, the write
+  blocks and the muxer waits. No `-re`, no live edge to fall off, no disk.
+- **both inputs cut at the same keyframe.** A probe finds the keyframe the seek
+  lands on and asks the video *and* the audio for exactly that instant. Without it
+  the video keeps its earlier keyframe while the audio is cut at the requested
+  time, and the first seconds of the stream have picture and no sound.
 
-The cost is disk, proportional to the part of the item already fetched, released
-when the stream ends (item change, idle timeout, plugin stop).
+The body only moves forward: a player may not seek it or resume it from an
+offset. The client re-resolves at the position it needs.
 
 ## Install
 

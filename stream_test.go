@@ -1,10 +1,12 @@
 package main
 
 import (
-	"errors"
+	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -22,7 +24,7 @@ func runningStream(t *testing.T, s *streams, token string, lastUse time.Time) *s
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 	})
-	st := &stream{token: token, cmd: cmd, lastUse: lastUse}
+	st := &stream{token: token, lastUse: lastUse, proc: &process{cmd: cmd}}
 	s.byToken[token] = st
 	return st
 }
@@ -90,7 +92,7 @@ func TestMakeRoomDropsStreamsWhoseProcessExited(t *testing.T) {
 	if err := done.Run(); err != nil {
 		t.Fatalf("run the stand-in process: %v", err)
 	}
-	s.byToken["dead"] = &stream{token: "dead", cmd: done, lastUse: now}
+	s.byToken["dead"] = &stream{token: "dead", lastUse: now, proc: &process{cmd: done}}
 
 	evicted, err := s.makeRoom()
 	if err != nil {
@@ -104,25 +106,73 @@ func TestMakeRoomDropsStreamsWhoseProcessExited(t *testing.T) {
 	}
 }
 
-func TestAPlaylistOfAnEndedRemuxReportsWhy(t *testing.T) {
+func TestAStreamIsOneContinuousBody(t *testing.T) {
+	// A player gets the media as one body, with no length and nothing to cache:
+	// it starts where the resolve asked and only ever moves forward. There is no
+	// playlist and no segment to disagree about.
 	s, err := newStreams()
 	if err != nil {
 		t.Fatalf("newStreams: %v", err)
 	}
 	defer s.close()
-	st := &stream{token: "tok", dir: t.TempDir(), stderr: &tailBuffer{}}
-	_, _ = st.stderr.Write([]byte("https://example.invalid/media: HTTP error 403 Forbidden"))
-	st.markExited(errors.New("exit status 1"))
-	s.byToken["tok"] = st
+	s.remuxer = writeScript(t, `printf 'FRAGMENT-ONE'; printf 'FRAGMENT-TWO'; sleep 1`)
 
+	st, err := s.open(context.Background(), []remuxInput{{url: "https://example.invalid/v", selector: "v"}}, 0, nil)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if !strings.HasSuffix(s.url(st), ".mp4") {
+		t.Fatalf("url %q, want a single body ending in .mp4", s.url(st))
+	}
+
+	path := "/s/" + st.token + "/stream.mp4"
 	rec := httptest.NewRecorder()
-	s.ServeHTTP(rec, httptest.NewRequest("GET", "/s/tok/index.m3u8", nil))
-	if rec.Code != http.StatusGone {
-		t.Fatalf("status %d, want 410", rec.Code)
+	s.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d, want 200", rec.Code)
 	}
-	if body := rec.Body.String(); !strings.Contains(body, "403") && !strings.Contains(body, "exit status") {
-		t.Fatalf("body %q, want the reason", body)
+	if got := rec.Header().Get("Content-Type"); got != "video/mp4" {
+		t.Fatalf("content type %q, want video/mp4", got)
 	}
+	if got := rec.Header().Get("Accept-Ranges"); got != "none" {
+		t.Fatalf("accept-ranges %q, want none", got)
+	}
+	if body := rec.Body.String(); body != "FRAGMENT-ONEFRAGMENT-TWO" {
+		t.Fatalf("body %q, want the whole media in order", body)
+	}
+}
+
+func TestAStreamIsGivenToTheFirstPlayerOnly(t *testing.T) {
+	// A second player opening the same URL gets a fresh remux from the same
+	// parameters rather than a body another response is already reading.
+	s, err := newStreams()
+	if err != nil {
+		t.Fatalf("newStreams: %v", err)
+	}
+	defer s.close()
+	s.remuxer = writeScript(t, `printf 'X'; sleep 1`)
+
+	st, err := s.open(context.Background(), []remuxInput{{url: "https://example.invalid/v", selector: "v"}}, 0, nil)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if st.claim() == nil {
+		t.Fatalf("the primed body was not claimable")
+	}
+	if st.claim() != nil {
+		t.Fatalf("the same primed body was handed out twice")
+	}
+}
+
+// writeScript writes a shell script standing in for the remuxer and returns its
+// path.
+func writeScript(t *testing.T, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "remux.sh")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body+"\n"), 0o700); err != nil {
+		t.Fatalf("write the stand-in remuxer: %v", err)
+	}
+	return path
 }
 
 func TestParseKeyframePtsReadsTheDecodersFirstFrame(t *testing.T) {
