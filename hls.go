@@ -175,8 +175,17 @@ func (s *streams) open(inputs []remuxInput, startAt float64, headers map[string]
 		// the beginning and keep following, and every segment stays readable
 		// behind it.
 		"-hls_playlist_type", "event",
+		// Fragmented MP4 segments, not MPEG-TS. The sources are fragmented MP4
+		// already, so this is the same boxes moved into a new file, without the
+		// TS repackaging that a player has to reverse: an HLS player reading TS
+		// has to reassemble PES packets and Annex-B access units, and a segment
+		// cut by the muxer mid-packet makes that reader lose the stream (a
+		// picture that stops while the transport keeps working). Every player
+		// worth targeting reads fMP4 HLS.
+		"-hls_segment_type", "fmp4",
+		"-hls_fmp4_init_filename", "init.mp4",
 		"-hls_flags", "independent_segments",
-		"-hls_segment_filename", filepath.Join(dir, "seg%05d.ts"),
+		"-hls_segment_filename", filepath.Join(dir, "seg%05d.m4s"),
 		filepath.Join(dir, "index.m3u8"),
 	)
 
@@ -393,8 +402,8 @@ func (s *streams) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case strings.HasSuffix(name, ".m3u8"):
 		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
-	case strings.HasSuffix(name, ".ts"):
-		w.Header().Set("Content-Type", "video/mp2t")
+	case strings.HasSuffix(name, ".m4s"), strings.HasSuffix(name, ".mp4"):
+		w.Header().Set("Content-Type", "video/mp4")
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	http.ServeFile(w, r, filepath.Join(st.dir, name))
