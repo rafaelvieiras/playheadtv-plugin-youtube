@@ -130,7 +130,9 @@ func (s *server) resolve(raw json.RawMessage) (any, error) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), resolveProbeTimeout)
 	defer cancel()
-	out, err := s.catalog.cmd(ctx, nil, "-j", "--no-warnings", "--no-progress", "--no-playlist", watchURL)
+	// -4 for the same reason as in catalog.go: an IPv6 address is challenged far
+	// more often than an IPv4 one, and a challenge is not retryable.
+	out, err := s.catalog.cmd(ctx, nil, "-j", "-4", "--no-warnings", "--no-progress", "--no-playlist", watchURL)
 	if err != nil {
 		return nil, classifyExtractorError(err)
 	}

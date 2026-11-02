@@ -205,6 +205,13 @@ func (c *catalog) fetch(ctx context.Context, cfg sourceConfig) ([]catalogItem, e
 
 	out, err := c.cmd(cctx, nil,
 		"--flat-playlist", "-J",
+		// IPv4 on purpose: this plugin usually runs on a server whose name
+		// resolves to AAAA first, and the site treats an IPv6 address far more
+		// suspiciously than an IPv4 one — extraction from a dual-stack host fails
+		// with "Sign in to confirm you're not a bot" while the same machine over
+		// IPv4 works. Forcing the family costs nothing here and removes a failure
+		// that depends on which address the resolver happens to prefer.
+		"-4",
 		"--no-warnings", "--ignore-errors", "--no-progress",
 		"--playlist-end", strconv.Itoa(cfg.maxItems()),
 		cfg.URL,
