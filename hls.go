@@ -77,10 +77,13 @@ func newStreams() (*streams, error) {
 		os.RemoveAll(baseDir)
 		return nil, fmt.Errorf("listen on %s: %w", listenAddress(), err)
 	}
+	// Advertised as loopback always: a listener bound to every interface reports
+	// "[::]:port" or "0.0.0.0:port", which no player can open. A host that is not on
+	// this machine rewrites the host part of the URL it hands out.
 	s := &streams{
 		byToken: map[string]*stream{},
 		baseDir: baseDir,
-		baseURL: "http://" + lf.Addr().String() + "/s/",
+		baseURL: "http://127.0.0.1:" + strconv.Itoa(lf.Addr().(*net.TCPAddr).Port) + "/s/",
 		lf:      lf,
 		clock:   time.Now,
 	}
