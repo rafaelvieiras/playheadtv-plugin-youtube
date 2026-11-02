@@ -47,10 +47,11 @@ const streamMaxConcurrent = 4
 
 const hlsSegmentSeconds = 6
 
-// hlsWindowSegments is the size of the remux window: 20 × 6 s is two minutes of
-// media on disk, which is what a player can seek back into. Seeking further back
-// is a new resolve, not a longer window.
-const hlsWindowSegments = 20
+// An event playlist keeps every segment it produced, so one stream holds as much
+// media on disk as the part of the item it has played: about 60 MB per ten
+// minutes at 720p, removed when the stream ends (an item change, an idle
+// stream, or the plugin stopping). What it buys is a player that can always read
+// behind itself instead of racing the producer for the newest segment.
 
 type streams struct {
 	mu      sync.Mutex
@@ -165,13 +166,16 @@ func (s *streams) open(inputs []remuxInput, startAt float64, headers map[string]
 		"-c", "copy",
 		"-f", "hls",
 		"-hls_time", strconv.Itoa(hlsSegmentSeconds),
-		// A sliding window, not an ever-growing event playlist: this plugin runs
-		// on the same machine as the player, which may be a 2 GB set-top box or
-		// a single-board computer. Segments older than the window are deleted as
-		// they are produced, so one stream never holds more than
-		// hlsWindowSegments × hlsSegmentSeconds of media on disk.
-		"-hls_list_size", strconv.Itoa(hlsWindowSegments),
-		"-hls_flags", "delete_segments+independent_segments",
+		// An event playlist, which is what this stream really is: it begins at the
+		// position the host asked for and grows to the end of the item. A sliding
+		// live window is the wrong shape here. At the moment a player opens the
+		// playlist it holds a single segment, so a player that treats it as a live
+		// edge has no cushion to read ahead into and stops as soon as it has
+		// played what was listed. An event playlist tells the player to start at
+		// the beginning and keep following, and every segment stays readable
+		// behind it.
+		"-hls_playlist_type", "event",
+		"-hls_flags", "independent_segments",
 		"-hls_segment_filename", filepath.Join(dir, "seg%05d.ts"),
 		filepath.Join(dir, "index.m3u8"),
 	)
