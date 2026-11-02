@@ -485,7 +485,9 @@ func (s *streams) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// one is re-read a moment later.
 		body, ok := completePlaylist(full)
 		if !ok {
-			if reason, dead := proc.exited(); dead {
+			reason, dead := proc.exited()
+			requestLog(r, rest, http.StatusNotFound, 0)
+			if dead {
 				w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 				w.WriteHeader(http.StatusGone)
 				_, _ = io.WriteString(w, "remux ended: "+reason)
@@ -498,13 +500,16 @@ func (s *streams) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(body)
+		requestLog(r, rest, http.StatusOK, len(body))
 		return
 	}
 	if strings.HasSuffix(name, ".m4s") || strings.HasSuffix(name, ".mp4") {
 		w.Header().Set("Content-Type", "video/mp4")
 	}
 	if _, err := os.Stat(full); err != nil {
-		if reason, dead := proc.exited(); dead {
+		reason, dead := proc.exited()
+		requestLog(r, rest, http.StatusNotFound, 0)
+		if dead {
 			// 410, not 404: the stream existed and is gone, so a player stops
 			// instead of retrying a URL that will never work again. The reason is
 			// the only explanation anyone will get.
@@ -535,8 +540,12 @@ func requestLog(r *http.Request, path string, status, written int) {
 		return
 	}
 	defer f.Close()
+	method, rng := "-", ""
+	if r != nil {
+		method, rng = r.Method, r.Header.Get("Range")
+	}
 	fmt.Fprintf(f, "%s %s %s -> %d (%d) range=%s\n",
-		time.Now().UTC().Format("15:04:05.000"), r.Method, path, status, written, r.Header.Get("Range"))
+		time.Now().UTC().Format("15:04:05.000"), method, path, status, written, rng)
 }
 
 // completePlaylist reads a playlist and returns it only when it is whole: the
