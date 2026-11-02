@@ -486,7 +486,28 @@ func (s *streams) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	http.ServeFile(w, r, full)
+	rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+	http.ServeFile(rec, r, full)
+	fmt.Fprintf(os.Stderr, "stream: %s %s -> %d (%d bytes)\n", r.Method, rest, rec.status, rec.written)
+}
+
+// statusRecorder remembers what a response ended up being, so the log says which
+// request failed and with what.
+type statusRecorder struct {
+	http.ResponseWriter
+	status  int
+	written int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.status = code
+	r.ResponseWriter.WriteHeader(code)
+}
+
+func (r *statusRecorder) Write(b []byte) (int, error) {
+	n, err := r.ResponseWriter.Write(b)
+	r.written += n
+	return n, err
 }
 
 type remuxInput struct {
