@@ -24,6 +24,30 @@ its request, and it is the only mode where this process touches media at all —
 a container rewrite, not a transcode, with the window capped so it cannot grow on
 a small machine (a 2 GB set-top box, a single-board computer).
 
+
+## How the stream is shaped
+
+The remux hands the player fragmented MP4 segments in an **event** playlist,
+produced **as fast as the source can be read**, and that combination is not
+arbitrary:
+
+- **fragmented MP4, not MPEG-TS.** The sources are fragmented MP4 already. TS
+  would make every player reverse a repackaging it never needed (PES packets,
+  then Annex-B access units), and a segment cut in the middle of a packet makes
+  that reader lose the stream.
+- **an event playlist, not a sliding window.** The stream begins where the host
+  asked for and grows to the end of the item. A sliding live window lists one
+  segment at the moment a player opens it, and a player that follows a live edge
+  has no cushion.
+- **reading ahead, not `-re`.** Pacing a remux to real time leaves the player
+  permanently at the edge of the media: any hiccup empties its buffer and the
+  picture stops for a moment, over and over. Reading ahead gives it the item
+  within seconds. This is only safe because the playlist is `event` and keeps
+  what it produced.
+
+The cost is disk, proportional to the part of the item already fetched, released
+when the stream ends (item change, idle timeout, plugin stop).
+
 ## Install
 
 The host installs plugins from a registry. Point it at this repository's
