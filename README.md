@@ -81,6 +81,13 @@ pointing at the two helper programs (inside a released artifact they are simply
 next to the binary). Those two environment variables exist for development and
 tests; a host never sets them.
 
+`PLAYHEADTV_PLUGIN_LISTEN` moves the remux server off loopback (`0.0.0.0:0` when
+the player is on another machine). The URLs still name `127.0.0.1` and the bound
+port: a host that is not on this machine rewrites the host part of the URL it
+gives its client, and keeps everything else. A `remux` stream is produced at
+playback speed (`-re`), so its sliding window always holds the media the player
+is about to fetch, never a copy that ran ahead of it.
+
 ## Build
 
     ./build.sh                  # every target

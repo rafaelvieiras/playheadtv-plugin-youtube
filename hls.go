@@ -67,10 +67,15 @@ func newStreams() (*streams, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create stream directory: %w", err)
 	}
-	lf, err := net.Listen("tcp", "127.0.0.1:0")
+	// Loopback by default: a stream the player fetches from the same machine.
+	// A host that runs the plugin elsewhere (a server, with the player on a TV)
+	// sets PLAYHEADTV_PLUGIN_LISTEN to a reachable address and rewrites the host
+	// of the URLs it hands to its client: the port, the token and the paths stay
+	// this plugin's own.
+	lf, err := net.Listen("tcp", listenAddress())
 	if err != nil {
 		os.RemoveAll(baseDir)
-		return nil, fmt.Errorf("listen on loopback: %w", err)
+		return nil, fmt.Errorf("listen on %s: %w", listenAddress(), err)
 	}
 	s := &streams{
 		byToken: map[string]*stream{},
@@ -87,6 +92,14 @@ func newStreams() (*streams, error) {
 }
 
 func (s *streams) init(remuxer string) { s.remuxer = remuxer }
+
+// listenAddress is where the stream server binds.
+func listenAddress() string {
+	if addr := strings.TrimSpace(os.Getenv("PLAYHEADTV_PLUGIN_LISTEN")); addr != "" {
+		return addr
+	}
+	return "127.0.0.1:0"
+}
 
 // open starts one remux from the given inputs and returns once the playlist has
 // a segment a player can fetch.
@@ -115,7 +128,12 @@ func (s *streams) open(inputs []remuxInput, startAt float64, headers map[string]
 
 	st := &stream{token: token, dir: dir, lastUse: s.clock(), stderr: &tailBuffer{}}
 
-	args := []string{"-hide_banner", "-nostdin", "-loglevel", "error", "-y"}
+	// -re: produce at playback speed instead of copying as fast as the network
+	// allows. A remux exists to feed a player that is watching now, and a copy
+	// that races ahead would slide its own window past the segments the player
+	// has not fetched yet. It also keeps the disk use of one stream at the window
+	// size instead of the whole item.
+	args := []string{"-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-re"}
 	args = append(args, headerArgs(headers)...)
 	for _, in := range inputs {
 		// -ss applies to the input that follows it, and input seeking is the
