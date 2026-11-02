@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -24,17 +25,18 @@ import (
 // served as one HTTP body. A player opens it like any other progressive file and
 // never learns there were two upstream files.
 //
-// One body, not HLS with segments and a playlist. Segments look like the natural
-// shape for a live stream, but with -c copy the muxer cannot cut them where it
-// wants: the video can only be cut on a keyframe and the audio anywhere, so the
-// two tracks of one stream end up with different segment boundaries and odd
-// declared durations (measured: 3.0s, 12.28s and 0.13s segments in one stream,
-// with the audio starting seconds after the video). A player that reads that
-// through its own extractor stopped a few seconds into every stream with data
-// still buffered — no error, no buffering flag, just a frozen picture. A single
-// continuous body has no boundaries to disagree about, and it is the shape this
-// app already plays best: the media server serves a progressive file the same
-// way.
+// HLS with the two tracks in SEPARATE playlists, which is the shape that survives
+// -c copy. The muxer cannot cut where it wants: video only on keyframes, audio
+// anywhere. Putting both tracks in one playlist therefore gives one stream
+// segments of 3.0s, 12.28s and 0.13s with the audio starting seconds after the
+// video — measured — and a player reading that stopped a few seconds in with data
+// still buffered (no error, no buffering flag, one frozen picture). With one
+// playlist per track (an HLS audio group) each track is cut on its own terms and
+// the player aligns them by timestamp, which is what it does for DASH.
+//
+// One continuous body would be simpler and was tried: media3 refuses an MP4 whose
+// length it cannot know, because its MP4 reader has to seek back after sniffing
+// (reproduced: "Source error", no detail). A playlist per track it can read.
 
 // streamEvictIdle is how quiet a stream must be before a new resolve may take its
 // place when the pool is full. Long enough to never break playback that is
@@ -48,12 +50,19 @@ const streamEvictIdle = 20 * time.Second
 // resolve handing out a URL and the player opening it.
 const streamIdleTimeout = 90 * time.Second
 
-// streamPrimedBytes is how much of the body is read before the URL is handed
-// out, so a source that cannot be read fails the resolve instead of failing the
-// player. Small: this is a liveness check, not a buffer.
-const streamPrimedBytes = 32 * 1024
+// The playlists the remux writes. One variant per track, joined by the master;
+// see the file comment for why they are not one playlist.
+const (
+	masterPlaylist = "master.m3u8"
+	videoVariant   = "v0"
+	audioVariant   = "audio"
+)
 
-// streamReadyTimeout bounds the wait for those first bytes. Remuxing starts at
+// hlsSegmentSeconds is what the muxer aims for between cuts. The tracks are cut
+// independently, so the real durations differ per track and that is fine.
+const hlsSegmentSeconds = 6
+
+// streamReadyTimeout bounds the wait for the first segment. Remuxing starts at
 // the requested offset, so this is "however long the site takes to answer".
 const streamReadyTimeout = 60 * time.Second
 
@@ -86,15 +95,13 @@ type stream struct {
 
 	mu      sync.Mutex
 	lastUse time.Time
-	taken   bool
 	proc    *process
 }
 
-// process is one running remux and the body it writes.
+// process is one running remux and the directory it writes into.
 type process struct {
-	cmd    *exec.Cmd
-	out    *io.PipeReader
-	primed []byte
+	cmd *exec.Cmd
+	dir string
 
 	mu      sync.Mutex
 	stderr  *tailBuffer
@@ -183,11 +190,22 @@ func (s *streams) open(ctx context.Context, inputs []remuxInput, startAt float64
 	return st, nil
 }
 
-func (s *streams) url(st *stream) string { return s.baseURL + st.token + "/stream.mp4" }
+func (s *streams) url(st *stream) string { return s.baseURL + st.token + "/" + masterPlaylist }
 
 // start launches one remux writing a fragmented MP4 to a pipe, and reads enough
 // of it to know the source works.
 func (s *streams) start(ctx context.Context, params streamParams) (*process, error) {
+	dir, err := os.MkdirTemp("", "playheadtv-yt-")
+	if err != nil {
+		return nil, fmt.Errorf("create stream directory: %w", err)
+	}
+	for _, variant := range []string{videoVariant, audioVariant} {
+		if err := os.MkdirAll(filepath.Join(dir, variant), 0o700); err != nil {
+			os.RemoveAll(dir)
+			return nil, fmt.Errorf("create stream directory: %w", err)
+		}
+	}
+
 	args := []string{"-hide_banner", "-nostdin", "-loglevel", "error", "-y"}
 	args = append(args, headerArgs(params.headers)...)
 	for _, in := range params.inputs {
@@ -203,72 +221,73 @@ func (s *streams) start(ctx context.Context, params streamParams) (*process, err
 	}
 	args = append(args,
 		"-c", "copy",
-		"-f", "mp4",
-		// Fragmented, and with an empty moov, so the first bytes are already
-		// playable and the file never has to be finished before it can be read.
-		// default_base_moof keeps each fragment self-describing, which is what a
-		// reader that joins mid-body needs.
-		"-movflags", "+frag_keyframe+empty_moov+default_base_moof",
-		"-",
+		"-f", "hls",
+		// One playlist per track (a variant stream each) so the muxer's cut points
+		// never have to agree between video and audio. This is the whole point of
+		// the shape; see the file comment.
+		"-var_stream_map", "v:0,agroup:aud,name:"+videoVariant+" a:0,agroup:aud,name:"+audioVariant+",default:yes",
+		"-master_pl_name", masterPlaylist,
+		"-hls_time", strconv.Itoa(hlsSegmentSeconds),
+		// An event playlist: it begins where the host asked and grows to the end of
+		// the item, keeping every segment behind it. A sliding live window lists a
+		// single segment at the moment a player opens it, and a player that follows
+		// a live edge has no cushion.
+		"-hls_playlist_type", "event",
+		// Fragmented MP4, not MPEG-TS: the sources are already fMP4, and TS would
+		// make every player reverse a repackaging it never needed.
+		"-hls_segment_type", "fmp4",
+		"-hls_fmp4_init_filename", "init.mp4",
+		"-hls_flags", "independent_segments",
+		"-hls_segment_filename", filepath.Join(dir, "%v", "seg%05d.m4s"),
+		filepath.Join(dir, "%v", "index.m3u8"),
 	)
 
-	pr, pw := io.Pipe()
-	cmd := exec.Command(s.remuxer, args...)
-	cmd.Stdout = pw
-	proc := &process{cmd: cmd, out: pr, stderr: &tailBuffer{}}
+	cmd := exec.CommandContext(ctx, s.remuxer, args...)
+	proc := &process{cmd: cmd, dir: dir, stderr: &tailBuffer{}}
+	cmd.Stdout = proc.stderr
 	cmd.Stderr = proc.stderr
 	if err := cmd.Start(); err != nil {
-		_ = pw.Close()
+		os.RemoveAll(dir)
 		return nil, fmt.Errorf("start remux: %w", err)
 	}
 	go func() {
-		// The exit is kept, not dropped: a body that ends early is a picture that
-		// stops without an error on the player's side, and its stderr is the only
-		// explanation anyone will get.
+		// The exit is kept, not dropped: a remux that dies while a player watches
+		// leaves a playlist with nothing new in it, which the player shows as a
+		// frozen picture with no error.
 		err := cmd.Wait()
 		proc.markExited(err)
-		_ = pw.CloseWithError(io.EOF)
 	}()
 
-	if err := proc.prime(); err != nil {
+	if err := proc.waitReady(streamReadyTimeout); err != nil {
 		proc.stop()
 		return nil, err
 	}
 	return proc, nil
 }
 
-// prime reads the first bytes of the body, so a source that cannot be read fails
-// here rather than in the player.
-func (p *process) prime() error {
-	type result struct {
-		buf []byte
-		err error
-	}
-	done := make(chan result, 1)
-	go func() {
-		// One read, not a full buffer: the point is to know the body started, and
-		// filling the buffer would block until that much media existed.
-		buf := make([]byte, streamPrimedBytes)
-		n, err := p.out.Read(buf)
-		if n > 0 {
-			err = nil
+// waitReady blocks until both variant playlists list a segment, so the host never
+// hands its player a URL that has nothing behind it.
+func (p *process) waitReady(timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if p.listed(videoVariant) && p.listed(audioVariant) {
+			return nil
 		}
-		done <- result{buf: buf[:n], err: err}
-	}()
-	select {
-	case res := <-done:
-		if res.err != nil {
+		if !p.running() {
 			msg := strings.TrimSpace(p.stderr.String())
 			if msg == "" {
-				msg = "the remux wrote nothing"
+				msg = "remux exited before the first segment"
 			}
 			return errf(codeUnavailable, "%s", msg)
 		}
-		p.primed = res.buf
-		return nil
-	case <-time.After(streamReadyTimeout):
-		return errf(codeUnavailable, "no media after %s", streamReadyTimeout)
+		time.Sleep(150 * time.Millisecond)
 	}
+	return errf(codeUnavailable, "no segment after %s", timeout)
+}
+
+func (p *process) listed(variant string) bool {
+	body, err := os.ReadFile(filepath.Join(p.dir, variant, "index.m3u8"))
+	return err == nil && strings.Contains(string(body), "#EXTINF")
 }
 
 // markExited records that the remux ended, keeping the last of its diagnostic
@@ -288,6 +307,16 @@ func (p *process) markExited(err error) {
 	p.exitErr = err
 }
 
+// exited reports whether the remux ended, and why.
+func (p *process) exited() (string, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.exitErr == nil {
+		return "", false
+	}
+	return p.exitErr.Error(), true
+}
+
 func (p *process) running() bool {
 	if p.cmd == nil || p.cmd.ProcessState != nil {
 		return false
@@ -300,8 +329,8 @@ func (p *process) stop() {
 	if p.cmd != nil && p.cmd.Process != nil {
 		_ = p.cmd.Process.Kill()
 	}
-	if p.out != nil {
-		_ = p.out.Close()
+	if p.dir != "" {
+		os.RemoveAll(p.dir)
 	}
 }
 
@@ -320,17 +349,6 @@ func (st *stream) paramsCopy() streamParams {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	return st.params
-}
-
-// claim hands the primed body to the one player that opened this URL.
-func (st *stream) claim() *process {
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	if st.taken {
-		return nil
-	}
-	st.taken = true
-	return st.proc
 }
 
 func (st *stream) touch(now time.Time) {
@@ -418,13 +436,12 @@ func (s *streams) close() {
 	_ = s.srv.Close()
 }
 
-// ServeHTTP serves one stream's body. Only a client that was handed the token can
-// read it, and the token is unguessable.
+// ServeHTTP serves one stream's files: the master playlist, the two variant
+// playlists, their init segments and their segments. Only a client holding the
+// token can read them, and the token is unguessable.
 func (s *streams) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	token := strings.TrimPrefix(r.URL.Path, "/s/")
-	if i := strings.IndexByte(token, '/'); i >= 0 {
-		token = token[:i]
-	}
+	rest := strings.TrimPrefix(r.URL.Path, "/s/")
+	token, name, _ := strings.Cut(rest, "/")
 	s.mu.Lock()
 	st, ok := s.byToken[token]
 	s.mu.Unlock()
@@ -434,58 +451,42 @@ func (s *streams) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	st.touch(s.clock())
 
-	proc := st.claim()
+	st.mu.Lock()
+	proc := st.proc
+	st.mu.Unlock()
 	if proc == nil {
-		// The player opened the URL a second time (it reopened after a stall, or
-		// reconnected). The primed body is gone: start the same stream again from
-		// the parameters the resolve stored.
-		fresh, err := s.start(r.Context(), st.paramsCopy())
-		if err != nil {
-			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-			w.Header().Set("Cache-Control", "no-store")
-			w.WriteHeader(http.StatusServiceUnavailable)
-			_, _ = io.WriteString(w, "remux failed: "+err.Error())
-			return
-		}
-		proc = fresh
+		http.NotFound(w, r)
+		return
 	}
-	defer func() {
-		proc.stop()
-		if st.claim() == nil && proc == st.proc {
-			s.forget(token)
-		}
-	}()
 
-	w.Header().Set("Content-Type", "video/mp4")
-	// The body has no length and must never be cached or resumed from an offset:
-	// it starts where the resolve asked and streams forward once.
+	// Only the files this plugin wrote, under this stream's own directory: the
+	// name is resolved and then checked to be inside it.
+	full := filepath.Join(proc.dir, filepath.Clean("/"+name))
+	if !strings.HasPrefix(full, filepath.Clean(proc.dir)+string(os.PathSeparator)) {
+		http.NotFound(w, r)
+		return
+	}
+	switch {
+	case strings.HasSuffix(name, ".m3u8"):
+		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+	case strings.HasSuffix(name, ".m4s"), strings.HasSuffix(name, ".mp4"):
+		w.Header().Set("Content-Type", "video/mp4")
+	}
 	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Accept-Ranges", "none")
-	w.WriteHeader(http.StatusOK)
-	flusher, _ := w.(http.Flusher)
-	if len(proc.primed) > 0 {
-		if _, err := w.Write(proc.primed); err != nil {
+	if _, err := os.Stat(full); err != nil {
+		if reason, dead := proc.exited(); dead {
+			// 410, not 404: the stream existed and is gone, so a player stops
+			// instead of retrying a URL that will never work again. The reason is
+			// the only explanation anyone will get.
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.WriteHeader(http.StatusGone)
+			_, _ = io.WriteString(w, "remux ended: "+reason)
 			return
 		}
-		if flusher != nil {
-			flusher.Flush()
-		}
+		http.NotFound(w, r)
+		return
 	}
-	buf := make([]byte, 64*1024)
-	for {
-		n, err := proc.out.Read(buf)
-		if n > 0 {
-			if _, werr := w.Write(buf[:n]); werr != nil {
-				return
-			}
-			if flusher != nil {
-				flusher.Flush()
-			}
-		}
-		if err != nil {
-			return
-		}
-	}
+	http.ServeFile(w, r, full)
 }
 
 type remuxInput struct {

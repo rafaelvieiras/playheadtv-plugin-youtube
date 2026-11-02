@@ -248,7 +248,7 @@ func TestResolveAsksForWhatTheHostCanPlay(t *testing.T) {
 	t.Run("remux when the host asks", func(t *testing.T) {
 		srv := testServer(t, fakeExtractor("testdata/channel-listing.json", nil))
 		// A remux runs the bundled remuxer; stub it so the test needs no ffmpeg.
-		srv.streams.remuxer = writeFakeRemuxer(t)
+		srv.streams.remuxer = fakeHLSRemuxer(t)
 		body, rpcErr := call(t, srv, "media.resolve", map[string]any{
 			"config":      config,
 			"item":        map[string]any{"external_id": "sO_lhW8av3U", "duration_ms": 149000},
@@ -265,8 +265,8 @@ func TestResolveAsksForWhatTheHostCanPlay(t *testing.T) {
 		if result.Mode != modeRemux || !result.Live || !strings.HasPrefix(result.URL, "http://127.0.0.1:") {
 			t.Fatalf("result = %+v, want a loopback body marked live", result)
 		}
-		if result.Mime != "video/mp4" {
-			t.Errorf("mime = %q, want one continuous mp4 body", result.Mime)
+		if result.Mime != "application/vnd.apple.mpegurl" {
+			t.Errorf("mime = %q, want the master playlist", result.Mime)
 		}
 	})
 }
@@ -316,20 +316,4 @@ func TestUnknownMethod(t *testing.T) {
 	if rpcErr == nil || rpcErr.Code != codeUnsupported {
 		t.Fatalf("error = %+v, want unsupported", rpcErr)
 	}
-}
-
-// writeFakeRemuxer writes a stand-in for the bundled remuxer: it writes a few
-// bytes of "media" to stdout and then stays alive like a real remux would.
-func writeFakeRemuxer(t *testing.T) string {
-	t.Helper()
-	dir := t.TempDir()
-	path := dir + "/fake-remuxer"
-	script := `#!/bin/sh
-printf 'FRAGMENT'
-sleep 30
-`
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake remuxer: %v", err)
-	}
-	return path
 }

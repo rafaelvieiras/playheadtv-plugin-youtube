@@ -106,70 +106,81 @@ func TestMakeRoomDropsStreamsWhoseProcessExited(t *testing.T) {
 	}
 }
 
-func TestAStreamIsOneContinuousBody(t *testing.T) {
-	// A player gets the media as one body, with no length and nothing to cache:
-	// it starts where the resolve asked and only ever moves forward. There is no
-	// playlist and no segment to disagree about.
+func TestAStreamIsOnePlaylistPerTrack(t *testing.T) {
+	// The player is handed a master playlist that joins two variant playlists, one
+	// per track, so the muxer's cut points never have to agree between video and
+	// audio.
 	s, err := newStreams()
 	if err != nil {
 		t.Fatalf("newStreams: %v", err)
 	}
 	defer s.close()
-	s.remuxer = writeScript(t, `printf 'FRAGMENT-ONE'; printf 'FRAGMENT-TWO'; sleep 1`)
+	s.remuxer = fakeHLSRemuxer(t)
 
 	st, err := s.open(context.Background(), []remuxInput{{url: "https://example.invalid/v", selector: "v"}}, 0, nil)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	if !strings.HasSuffix(s.url(st), ".mp4") {
-		t.Fatalf("url %q, want a single body ending in .mp4", s.url(st))
+	if !strings.HasSuffix(s.url(st), "/"+masterPlaylist) {
+		t.Fatalf("url %q, want the master playlist", s.url(st))
 	}
 
-	path := "/s/" + st.token + "/stream.mp4"
+	for path, wantType := range map[string]string{
+		masterPlaylist:                 "application/vnd.apple.mpegurl",
+		videoVariant + "/index.m3u8":   "application/vnd.apple.mpegurl",
+		audioVariant + "/index.m3u8":   "application/vnd.apple.mpegurl",
+		videoVariant + "/seg00000.m4s": "video/mp4",
+	} {
+		rec := httptest.NewRecorder()
+		s.ServeHTTP(rec, httptest.NewRequest("GET", "/s/"+st.token+"/"+path, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: status %d, want 200", path, rec.Code)
+		}
+		if got := rec.Header().Get("Content-Type"); got != wantType {
+			t.Errorf("%s: content type %q, want %q", path, got, wantType)
+		}
+		if rec.Body.Len() == 0 {
+			t.Errorf("%s: empty body", path)
+		}
+	}
+}
+
+func TestAStreamCannotBeReadOutsideItsOwnDirectory(t *testing.T) {
+	s, err := newStreams()
+	if err != nil {
+		t.Fatalf("newStreams: %v", err)
+	}
+	defer s.close()
+	s.remuxer = fakeHLSRemuxer(t)
+	st, err := s.open(context.Background(), []remuxInput{{url: "https://example.invalid/v", selector: "v"}}, 0, nil)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
 	rec := httptest.NewRecorder()
-	s.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status %d, want 200", rec.Code)
-	}
-	if got := rec.Header().Get("Content-Type"); got != "video/mp4" {
-		t.Fatalf("content type %q, want video/mp4", got)
-	}
-	if got := rec.Header().Get("Accept-Ranges"); got != "none" {
-		t.Fatalf("accept-ranges %q, want none", got)
-	}
-	if body := rec.Body.String(); body != "FRAGMENT-ONEFRAGMENT-TWO" {
-		t.Fatalf("body %q, want the whole media in order", body)
+	s.ServeHTTP(rec, httptest.NewRequest("GET", "/s/"+st.token+"/../../etc/passwd", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status %d, want 404", rec.Code)
 	}
 }
 
-func TestAStreamIsGivenToTheFirstPlayerOnly(t *testing.T) {
-	// A second player opening the same URL gets a fresh remux from the same
-	// parameters rather than a body another response is already reading.
-	s, err := newStreams()
-	if err != nil {
-		t.Fatalf("newStreams: %v", err)
-	}
-	defer s.close()
-	s.remuxer = writeScript(t, `printf 'X'; sleep 1`)
-
-	st, err := s.open(context.Background(), []remuxInput{{url: "https://example.invalid/v", selector: "v"}}, 0, nil)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	if st.claim() == nil {
-		t.Fatalf("the primed body was not claimable")
-	}
-	if st.claim() != nil {
-		t.Fatalf("the same primed body was handed out twice")
-	}
-}
-
-// writeScript writes a shell script standing in for the remuxer and returns its
-// path.
-func writeScript(t *testing.T, body string) string {
+// fakeHLSRemuxer writes a stand-in for the bundled remuxer: it creates the two
+// variant playlists and a segment in the directory the plugin told it to use, then
+// stays alive like a real remux would.
+func fakeHLSRemuxer(t *testing.T) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "remux.sh")
-	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body+"\n"), 0o700); err != nil {
+	path := filepath.Join(t.TempDir(), "fake-remuxer")
+	script := `#!/bin/sh
+for last; do out="$last"; done
+dir=$(dirname "$(dirname "$out")")
+mkdir -p "$dir/` + videoVariant + `" "$dir/` + audioVariant + `"
+printf '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1,AUDIO="aud"\n` + videoVariant + `/index.m3u8\n' > "$dir/` + masterPlaylist + `"
+for v in ` + videoVariant + ` ` + audioVariant + `; do
+  printf '#EXTM3U\n#EXTINF:6.0,\nseg00000.m4s\n' > "$dir/$v/index.m3u8"
+  printf 'segment' > "$dir/$v/seg00000.m4s"
+done
+sleep 30
+`
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
 		t.Fatalf("write the stand-in remuxer: %v", err)
 	}
 	return path

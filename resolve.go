@@ -176,9 +176,9 @@ func (s *server) resolve(raw json.RawMessage) (any, error) {
 		return resolveResult{
 			Mode: modeRemux,
 			URL:  s.streams.url(st),
-			Mime: "video/mp4",
-			// One continuous body that only ever moves forward: a player must not
-			// try to seek or resume it.
+			Mime: "application/vnd.apple.mpegurl",
+			// A playlist that grows to the end of the item, with one variant per
+			// track.
 			Live: true,
 		}, nil
 	}

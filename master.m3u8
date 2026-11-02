@@ -1,0 +1,3 @@
+#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=1,AUDIO="aud"
+v0/index.m3u8
