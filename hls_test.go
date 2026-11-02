@@ -1,7 +1,11 @@
 package main
 
 import (
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 )
@@ -97,5 +101,26 @@ func TestMakeRoomDropsStreamsWhoseProcessExited(t *testing.T) {
 	}
 	if _, still := s.byToken["dead"]; still {
 		t.Fatal("a stream whose process exited is still in the pool")
+	}
+}
+
+func TestAPlaylistOfAnEndedRemuxReportsWhy(t *testing.T) {
+	s, err := newStreams()
+	if err != nil {
+		t.Fatalf("newStreams: %v", err)
+	}
+	defer s.close()
+	st := &stream{token: "tok", dir: t.TempDir(), stderr: &tailBuffer{}}
+	_, _ = st.stderr.Write([]byte("https://example.invalid/media: HTTP error 403 Forbidden"))
+	st.markExited(errors.New("exit status 1"))
+	s.byToken["tok"] = st
+
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, httptest.NewRequest("GET", "/s/tok/index.m3u8", nil))
+	if rec.Code != http.StatusGone {
+		t.Fatalf("status %d, want 410", rec.Code)
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "403") && !strings.Contains(body, "exit status") {
+		t.Fatalf("body %q, want the reason", body)
 	}
 }

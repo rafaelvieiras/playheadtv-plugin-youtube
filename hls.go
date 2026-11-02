@@ -3,7 +3,9 @@ package main
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -69,6 +71,9 @@ type stream struct {
 
 	mu     sync.Mutex
 	stderr *tailBuffer
+	// exitErr is set once the remux process has ended, with its stderr tail as
+	// the reason: an ended remux can never produce another segment.
+	exitErr error
 }
 
 func newStreams() (*streams, error) {
@@ -179,7 +184,14 @@ func (s *streams) open(inputs []remuxInput, startAt float64, headers map[string]
 		return nil, fmt.Errorf("start remux: %w", err)
 	}
 	st.cmd = cmd
-	go func() { _ = cmd.Wait() }()
+	go func() {
+		// The outcome is kept, not dropped: a remux that dies while a player is
+		// watching leaves a playlist with nothing new in it, which a player shows
+		// as a frozen picture with no error. Whoever asks for the playlist next
+		// gets the failure and its reason instead.
+		err := cmd.Wait()
+		st.markExited(err)
+	}()
 
 	s.mu.Lock()
 	s.byToken[token] = st
@@ -221,6 +233,34 @@ func (st *stream) running() bool {
 		return false
 	}
 	return true
+}
+
+// markExited records that the remux ended, keeping the last of its diagnostic
+// output as the reason. The first reason wins: a stream only ends once.
+func (st *stream) markExited(err error) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.exitErr != nil {
+		return
+	}
+	if err == nil {
+		err = errors.New("the remux finished")
+	}
+	detail := strings.TrimSpace(st.stderr.String())
+	if detail != "" {
+		err = fmt.Errorf("%w: %s", err, detail)
+	}
+	st.exitErr = err
+}
+
+// exited reports whether the remux ended, and why.
+func (st *stream) exited() (string, bool) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.exitErr == nil {
+		return "", false
+	}
+	return st.exitErr.Error(), true
 }
 
 func (st *stream) touch(now time.Time) {
@@ -335,6 +375,15 @@ func (s *streams) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	name := filepath.Base(parts[1])
 	if name != parts[1] {
 		http.NotFound(w, r)
+		return
+	}
+	if reason, dead := st.exited(); dead {
+		// 410, not 404: the stream existed and is gone, so a player stops instead
+		// of retrying a URL that will never work again.
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusGone)
+		_, _ = io.WriteString(w, "remux ended: "+reason)
 		return
 	}
 	switch {
