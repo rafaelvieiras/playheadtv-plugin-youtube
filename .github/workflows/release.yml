@@ -1,0 +1,39 @@
+name: Release
+
+# A tag is a release: every artifact it publishes is hashed into the registry
+# document hosts read, so the two can never disagree.
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  artifacts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Test
+        run: |
+          go vet ./...
+          go test ./...
+      - name: Build artifacts and registry
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          version="${VERSION#v}"
+          VERSION="$version" ./build.sh
+          # The released registry must point at this release's own assets.
+          VERSION="$version" REPO="${{ github.repository }}" ./build.sh >/dev/null
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/plugin-youtube-*.tar.gz
+            dist/registry.json
+          fail_on_unmatched_files: true

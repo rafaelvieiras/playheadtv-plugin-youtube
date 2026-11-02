@@ -1,0 +1,78 @@
+{
+  "_type": "playlist",
+  "id": "UCSMOQeBJ2RAnuFungnQOxLg",
+  "title": "Blender - Videos",
+  "channel": "Blender",
+  "extractor": "youtube:tab",
+  "webpage_url": "https://www.youtube.com/channel/UCSMOQeBJ2RAnuFungnQOxLg/videos",
+  "entries": [
+    {
+      "_type": "url",
+      "id": "dVrELpmfcEQ",
+      "title": "Blender Education Community Meeting \u2014 BCON26",
+      "duration": 7482,
+      "url": "https://www.youtube.com/watch?v=dVrELpmfcEQ",
+      "live_status": null,
+      "availability": null,
+      "timestamp": null
+    },
+    {
+      "_type": "url",
+      "id": "sO_lhW8av3U",
+      "title": "Blender Conference 2026 Recap",
+      "duration": 149,
+      "url": "https://www.youtube.com/watch?v=sO_lhW8av3U",
+      "live_status": null,
+      "availability": null,
+      "timestamp": null
+    },
+    {
+      "_type": "url",
+      "id": "SVJiCL3K0j4",
+      "title": "The Future of Rendering \u2014 BCON26",
+      "duration": 1106,
+      "url": "https://www.youtube.com/watch?v=SVJiCL3K0j4",
+      "live_status": null,
+      "availability": null,
+      "timestamp": null
+    },
+    {
+      "_type": "url",
+      "id": "LIVE0000001",
+      "title": "Live right now",
+      "duration": null,
+      "url": "https://www.youtube.com/watch?v=LIVE0000001",
+      "live_status": "is_live"
+    },
+    {
+      "_type": "url",
+      "id": "PREMIER0001",
+      "title": "Upcoming premiere",
+      "duration": null,
+      "url": "https://www.youtube.com/watch?v=PREMIER0001",
+      "live_status": "is_upcoming"
+    },
+    {
+      "_type": "url",
+      "id": "SHORT000001",
+      "title": "A short",
+      "duration": 22,
+      "url": "https://www.youtube.com/shorts/SHORT000001"
+    },
+    {
+      "_type": "url",
+      "id": "PRIVATE0001",
+      "title": "Members only",
+      "duration": 600,
+      "url": "https://www.youtube.com/watch?v=PRIVATE0001",
+      "availability": "subscriber_only"
+    },
+    {
+      "_type": "url",
+      "id": "dVrELpmfcEQ",
+      "title": "Duplicate of the first entry",
+      "duration": 7482,
+      "url": "https://www.youtube.com/watch?v=dVrELpmfcEQ"
+    }
+  ]
+}

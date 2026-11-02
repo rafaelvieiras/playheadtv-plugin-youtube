@@ -1,0 +1,9 @@
+{
+  "id": "youtube",
+  "name": "YouTube",
+  "description": "Channels, playlists and single videos from YouTube.",
+  "version": "0.1.0",
+  "protocol": 1,
+  "entrypoint": "playheadtv-plugin-youtube",
+  "capabilities": ["catalog.list", "media.resolve"]
+}
