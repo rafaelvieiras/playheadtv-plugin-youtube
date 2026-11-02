@@ -97,9 +97,14 @@ Outputs `dist/plugin-youtube-<os>-<arch>.tar.gz` and `dist/registry.json` with a
 SHA-256 per artifact. The release workflow does exactly this on a tag and
 publishes both, so the registry can never describe bytes that were not released.
 
-Artifacts are large (~70 MB) because they carry a static `ffmpeg`. Only remuxing
+Artifacts are large (~115 MB) because they carry an `ffmpeg` build. Only remuxing
 uses it, and only a minimal build would be enough; a slimmer artifact is a
 possible follow-up.
+
+The remuxer is a BtbN static build, not johnvansickle's: that one segfaults on the
+media URLs an extractor hands out (every item of a real playlist reproduced it),
+which surfaced as `remux exited before the first segment` on every play. Verify any
+replacement against a real source URL, with `-re` and two inputs.
 
 ## Legal
 

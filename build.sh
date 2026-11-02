@@ -20,8 +20,8 @@ CACHE=${CACHE:-.cache}
 OUT=${OUT:-dist}
 
 EXTRACTOR_BASE=${EXTRACTOR_BASE:-https://github.com/yt-dlp/yt-dlp/releases/latest/download}
-REMUXER_BASE=${REMUXER_BASE:-https://johnvansickle.com/ffmpeg/releases}
-REMUXER_WINDOWS=${REMUXER_WINDOWS:-https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip}
+REMUXER_BASE=${REMUXER_BASE:-https://github.com/BtbN/FFmpeg-Builds/releases/download/latest}
+REMUXER_WINDOWS=${REMUXER_WINDOWS:-$REMUXER_BASE/ffmpeg-master-latest-win64-gpl.zip}
 
 mkdir -p "$CACHE" "$OUT"
 
@@ -87,8 +87,13 @@ build_target() {
 		esac
 		cp "$CACHE/yt-dlp-linux-$arch" "$stage/yt-dlp"
 		chmod 0755 "$stage/yt-dlp"
-		fetch "$REMUXER_BASE/ffmpeg-release-$arch-static.tar.xz" "$CACHE/ffmpeg-linux-$arch.tar.xz"
-		unpack_remuxer "$CACHE/ffmpeg-linux-$arch.tar.xz" "*/ffmpeg" "$stage/ffmpeg"
+		# Not johnvansickle's static build: it segfaults on the media URLs an
+		# extractor hands out (reproduced on every item of a real playlist), which
+		# made every `remux` fail with "exited before the first segment". These
+		# builds were verified against real source URLs, with -re and two inputs.
+		fetch "$REMUXER_BASE/ffmpeg-master-latest-linux$([ "$arch" = amd64 ] && echo 64 || echo arm64)-gpl.tar.xz" \
+			"$CACHE/ffmpeg-linux-$arch.tar.xz"
+		unpack_remuxer "$CACHE/ffmpeg-linux-$arch.tar.xz" "*/bin/ffmpeg" "$stage/ffmpeg"
 		;;
 	windows)
 		fetch "$EXTRACTOR_BASE/yt-dlp.exe" "$CACHE/yt-dlp-windows-amd64.exe"
