@@ -29,7 +29,10 @@ jobs:
           version="${VERSION#v}"
           VERSION="$version" ./build.sh
           # The released registry must point at this release's own assets.
-          VERSION="$version" REPO="${{ github.repository }}" ./build.sh >/dev/null
+          # The base url is the whole point of the registry: a bare "owner/repo"
+          # makes every artifact url relative to nothing (a host then fails with
+          # "no such host: <owner>"). github.com is not implied anywhere.
+          VERSION="$version" REPO="github.com/${{ github.repository }}" ./build.sh >/dev/null
       - name: Publish
         uses: softprops/action-gh-release@v2
         with:

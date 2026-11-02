@@ -16,6 +16,10 @@ VERSION=${VERSION:-$(git describe --tags --always --dirty 2>/dev/null || echo 0.
 VERSION=${VERSION#v}
 REPO=${REPO:-github.com/rafaelvieiras/playheadtv-plugin-youtube}
 BASE_URL=${BASE_URL:-https://$REPO/releases/download/v$VERSION}
+case $BASE_URL in
+https://*) ;;
+*) echo "BASE_URL must be absolute, got '$BASE_URL' (a host cannot download from it)" >&2; exit 1 ;;
+esac
 CACHE=${CACHE:-.cache}
 OUT=${OUT:-dist}
 
