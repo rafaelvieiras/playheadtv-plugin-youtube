@@ -124,3 +124,26 @@ func TestAPlaylistOfAnEndedRemuxReportsWhy(t *testing.T) {
 		t.Fatalf("body %q, want the reason", body)
 	}
 }
+
+func TestParseKeyframePtsReadsTheDecodersFirstFrame(t *testing.T) {
+	// The shape ffmpeg's showinfo filter writes, trimmed to what matters. The
+	// probe asks for one frame, so the first report is the keyframe the seek
+	// landed on and the one both inputs must be cut at.
+	report := `[Parsed_showinfo_0 @ 0x7f686c001e00] n:   0 pts:54020967 pts_time:1800.6989 duration:   1001 duration_time:0.0333667 fmt:yuv420p cl:left sar:1/1 s:1280x720 i:P iskey:1 type:I checksum:58AC6354`
+	at, ok := parseKeyframePts(report, 1819.283)
+	if !ok {
+		t.Fatalf("no keyframe found in the probe report")
+	}
+	if at < 1800.69 || at > 1800.70 {
+		t.Fatalf("keyframe = %v, want 1800.6989", at)
+	}
+}
+
+func TestParseKeyframePtsRefusesAKeyframeAfterTheTarget(t *testing.T) {
+	// A keyframe past the requested position is not usable: cutting there would
+	// skip media the host asked to play.
+	report := `... pts_time:1999.500 ... iskey:1 ...`
+	if _, ok := parseKeyframePts(report, 1819.283); ok {
+		t.Fatalf("accepted a keyframe after the target")
+	}
+}

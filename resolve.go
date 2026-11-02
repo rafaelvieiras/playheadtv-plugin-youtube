@@ -168,7 +168,7 @@ func (s *server) resolve(raw json.RawMessage) (any, error) {
 	// The fallback, and the only mode where this process touches media: remux
 	// into a bounded HLS window. Never reached unless the host asked for it.
 	if modes[modeRemux] && len(plan.inputs()) > 0 {
-		st, err := s.streams.open(plan.inputs(), startAt, plan.headers)
+		st, err := s.streams.open(ctx, plan.inputs(), startAt, plan.headers)
 		if err != nil {
 			return nil, err
 		}

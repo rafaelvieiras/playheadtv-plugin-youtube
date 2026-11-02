@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -119,9 +121,75 @@ func listenAddress() string {
 	return "127.0.0.1:0"
 }
 
+// keyframeProbeWindow is how far before the target the keyframe probe starts
+// looking, and keyframeProbeTimeout bounds it: the probe reads at most that much
+// before the seek target, so it is a few megabytes and a second or two.
+var (
+	keyframeProbeWindow  = 20 * time.Second
+	keyframeProbeTimeout = 20 * time.Second
+	keyframePts          = regexp.MustCompile(`iskey:1.*?pts_time:([0-9.]+)|pts_time:([0-9.]+).*?iskey:1`)
+)
+
+// keyframeAt reports the last keyframe at or before target, or false when the
+// inputs cannot be probed (a single input needs no probing: its own timeline is
+// the timeline).
+func (s *streams) keyframeAt(ctx context.Context, inputs []remuxInput, target float64, headers map[string]string) (float64, bool) {
+	if len(inputs) < 2 || target <= 0 {
+		return 0, false
+	}
+	var video string
+	for _, in := range inputs {
+		if in.selector == "v" {
+			video = in.url
+			break
+		}
+	}
+	if video == "" {
+		return 0, false
+	}
+	// The seek point can be a full GOP before the target, so the probe starts a
+	// window earlier and asks the decoder for its first frame: the decoder always
+	// begins on a keyframe, and -copyts keeps that frame's timestamp in source
+	// time (without it the probe would report the seek point as zero).
+	from := target - keyframeProbeWindow.Seconds()
+	if from < 0 {
+		from = 0
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, keyframeProbeTimeout)
+	defer cancel()
+	args := []string{"-hide_banner", "-nostdin", "-loglevel", "info", "-copyts",
+		"-ss", strconv.FormatFloat(from, 'f', 3, 64), "-noaccurate_seek"}
+	args = append(args, headerArgs(headers)...)
+	args = append(args, "-i", video, "-map", "0:v:0", "-skip_frame", "nokey",
+		"-vf", "showinfo", "-frames:v", "1", "-f", "null", "-")
+	// Combined output on purpose: ffmpeg writes the filter report to stderr and
+	// exits non-zero when it is killed at the end of the probe, which is the
+	// expected outcome here — the report is still what we came for.
+	out, _ := exec.CommandContext(probeCtx, s.remuxer, args...).CombinedOutput()
+	return parseKeyframePts(string(out), target)
+}
+
+// parseKeyframePts reads the timestamp of the first keyframe the probe decoded.
+// Split out of keyframeAt so the shape of the remuxer's report is pinned by a
+// test rather than by whoever next reads this code.
+func parseKeyframePts(report string, target float64) (float64, bool) {
+	for _, m := range keyframePts.FindAllStringSubmatch(report, -1) {
+		value := m[1]
+		if value == "" {
+			value = m[2]
+		}
+		at, err := strconv.ParseFloat(value, 64)
+		if err != nil || at <= 0 || at > target {
+			continue
+		}
+		return at, true
+	}
+	return 0, false
+}
+
 // open starts one remux from the given inputs and returns once the playlist has
 // a segment a player can fetch.
-func (s *streams) open(inputs []remuxInput, startAt float64, headers map[string]string) (*stream, error) {
+func (s *streams) open(ctx context.Context, inputs []remuxInput, startAt float64, headers map[string]string) (*stream, error) {
 	// A full pool is not a reason to refuse a viewer: the stalest stream makes
 	// room. Refusing here used to be the whole story, which turned one abandoned
 	// playback into minutes of every new tune-in failing (the client retried, the
@@ -151,6 +219,18 @@ func (s *streams) open(inputs []remuxInput, startAt float64, headers map[string]
 	// within seconds, which is what makes it smooth, and it is only safe because
 	// the playlist is an event playlist that keeps what it produced (a sliding
 	// window would delete the segments the player had not reached yet).
+	// Both inputs must begin at the same instant, and with -c copy the only
+	// instant the video can begin on is a keyframe. Asking both for exactly
+	// startAt gives the video the keyframe BEFORE it (up to a whole GOP, ~10s on
+	// these sources) while the audio loses nothing, so the audio starts seconds
+	// after the video and the first seconds of the stream have picture and no
+	// sound. Players that follow the audio clock then stop at exactly that seam
+	// (reproduced: picture froze at 9-10s of every stream, with no error). Asking
+	// both for the keyframe itself removes the hole: the audio is cut there too.
+	if keyframe, ok := s.keyframeAt(ctx, inputs, startAt, headers); ok {
+		startAt = keyframe
+	}
+
 	args := []string{"-hide_banner", "-nostdin", "-loglevel", "error", "-y"}
 	args = append(args, headerArgs(headers)...)
 	for _, in := range inputs {
