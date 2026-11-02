@@ -22,9 +22,18 @@ import (
 // playlist like any other; it never learns there were two upstream files.
 
 // streamIdleTimeout is how long a stream survives without a request. A player
-// that stopped fetching is gone (channel switched, app closed), and the segments
-// on disk are the biggest thing this plugin ever allocates.
-const streamIdleTimeout = 20 * time.Minute
+// that stopped fetching is gone (channel switched, app closed), and a live stream
+// is not free: it holds a remux process, the bandwidth of the site being read at
+// playback speed, and its segments on disk. An HLS player asks for a segment
+// every few seconds, so one and a half minutes of silence means nobody is
+// watching.
+const streamIdleTimeout = 90 * time.Second
+
+// streamEvictIdle is how quiet a stream must be before a new resolve may take its
+// place when the pool is full. Long enough to never break playback that is
+// merely thinking (a player rebuffering), short enough that a handful of
+// abandoned streams cannot make the plugin refuse to start one more.
+const streamEvictIdle = 20 * time.Second
 
 // streamReadyTimeout bounds the wait for the first segment. Remuxing starts at
 // the requested offset, so this is "however long the site takes to answer".
@@ -107,18 +116,15 @@ func listenAddress() string {
 // open starts one remux from the given inputs and returns once the playlist has
 // a segment a player can fetch.
 func (s *streams) open(inputs []remuxInput, startAt float64, headers map[string]string) (*stream, error) {
-	s.mu.Lock()
-	live := 0
-	for _, st := range s.byToken {
-		if st.running() {
-			live++
-		}
+	// A full pool is not a reason to refuse a viewer: the stalest stream makes
+	// room. Refusing here used to be the whole story, which turned one abandoned
+	// playback into minutes of every new tune-in failing (the client retried, the
+	// pool never drained).
+	if evicted, err := s.makeRoom(); err != nil {
+		return nil, err
+	} else if evicted != nil {
+		evicted.stop()
 	}
-	if live >= streamMaxConcurrent {
-		s.mu.Unlock()
-		return nil, errf(codeUnavailable, "already remuxing %d streams", live)
-	}
-	s.mu.Unlock()
 
 	token, err := newToken()
 	if err != nil {
@@ -235,6 +241,35 @@ func (st *stream) stop() {
 		_ = st.cmd.Process.Kill()
 	}
 	os.RemoveAll(st.dir)
+}
+
+// makeRoom stops and returns the least recently used stream when the pool is
+// full and that stream has been quiet for [streamEvictIdle]. It returns a nil
+// stream when there is room, and an error only when every slot is in use.
+func (s *streams) makeRoom() (*stream, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	live := 0
+	var stalest *stream
+	for token, st := range s.byToken {
+		if !st.running() {
+			// A process that already exited holds a slot for nothing.
+			delete(s.byToken, token)
+			continue
+		}
+		live++
+		if stalest == nil || st.lastUsed().Before(stalest.lastUsed()) {
+			stalest = st
+		}
+	}
+	if live < streamMaxConcurrent {
+		return nil, nil
+	}
+	if stalest == nil || s.clock().Sub(stalest.lastUsed()) < streamEvictIdle {
+		return nil, errf(codeUnavailable, "already remuxing %d streams, all in use", live)
+	}
+	delete(s.byToken, stalest.token)
+	return stalest, nil
 }
 
 func (s *streams) forget(token string) {
