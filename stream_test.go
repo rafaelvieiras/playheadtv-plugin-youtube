@@ -106,6 +106,38 @@ func TestMakeRoomDropsStreamsWhoseProcessExited(t *testing.T) {
 	}
 }
 
+// The source refuses a freshly resolved url on one of its nodes and serves the
+// same url on the next request. One refused read must not cost the item.
+func TestASourceRefusalIsTriedAgain(t *testing.T) {
+	s, err := newStreams()
+	if err != nil {
+		t.Fatalf("newStreams: %v", err)
+	}
+	defer s.close()
+
+	marker := filepath.Join(t.TempDir(), "tried")
+	s.remuxer = fakeRefusingRemuxerOnce(t, marker)
+
+	if _, err := s.open(context.Background(), []remuxInput{{url: "https://example.invalid/v", selector: "v"}, {url: "https://example.invalid/a", selector: "a"}}, 0, nil); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+}
+
+// A refusal that keeps happening is the item's problem, and the second try is
+// the last one: the caller has a channel to keep running.
+func TestASourceRefusalIsNotRetriedForever(t *testing.T) {
+	s, err := newStreams()
+	if err != nil {
+		t.Fatalf("newStreams: %v", err)
+	}
+	defer s.close()
+	s.remuxer = fakeRefusingRemuxer(t)
+
+	if _, err := s.open(context.Background(), []remuxInput{{url: "https://example.invalid/v", selector: "v"}, {url: "https://example.invalid/a", selector: "a"}}, 0, nil); err == nil {
+		t.Fatal("open succeeded, want the refusal reported")
+	}
+}
+
 func TestAStreamIsOnePlaylistPerTrack(t *testing.T) {
 	// The player is handed a master playlist that joins two variant playlists, one
 	// per track, so the muxer's cut points never have to agree between video and
@@ -207,4 +239,43 @@ func TestParseKeyframePtsRefusesAKeyframeAfterTheTarget(t *testing.T) {
 	if _, ok := parseKeyframePts(report, 1819.283); ok {
 		t.Fatalf("accepted a keyframe after the target")
 	}
+}
+
+// fakeRefusingRemuxer always refuses the read, the way the source does with 403.
+func fakeRefusingRemuxer(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "refusing-remuxer")
+	script := `#!/bin/sh
+echo "[in#0] Error opening input: Server returned 403 Forbidden (access denied)" >&2
+exit 8
+`
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+		t.Fatalf("write the refusing remuxer: %v", err)
+	}
+	return path
+}
+
+// fakeRefusingRemuxerOnce refuses the first run and behaves afterwards, which is
+// what the source did when measured.
+func fakeRefusingRemuxerOnce(t *testing.T, marker string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "refusing-once-remuxer")
+	script := `#!/bin/sh
+if [ ! -f "` + marker + `" ]; then
+  : > "` + marker + `"
+  echo "[in#0] Error opening input: Server returned 403 Forbidden (access denied)" >&2
+  exit 8
+fi
+playlist=""
+for last; do playlist="$last"; done
+dir=$(dirname "$playlist")
+mkdir -p "$dir"
+printf '#EXTM3U\n#EXTINF:6.0,\nseg00000.m4s\n' > "$playlist"
+printf 'segment' > "$dir/seg00000.m4s"
+sleep 30
+`
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+		t.Fatalf("write the refusing remuxer: %v", err)
+	}
+	return path
 }

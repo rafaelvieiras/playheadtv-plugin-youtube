@@ -199,6 +199,15 @@ func (s *streams) open(ctx context.Context, inputs []remuxInput, startAt float64
 		lastUse: s.clock(),
 	}
 	procs, err := s.start(st.params)
+	if err != nil && refusedByTheSource(err) {
+		// A refusal is not a verdict. The source answers 403 for a freshly
+		// resolved url on one of its nodes and serves the very same url on the
+		// next request (measured: the url it had just refused opened five seconds
+		// later, from the same machine and the same address). From here the two
+		// look identical, so one more try is what tells them apart, and it costs
+		// a second instead of an item the channel then skips.
+		procs, err = s.start(st.params)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -299,6 +308,17 @@ func (s *streams) start(params streamParams) ([]*process, error) {
 		return nil, err
 	}
 	return procs, nil
+}
+
+// refusedByTheSource reports a failure the source answered with a refusal, rather
+// than one that says the item itself cannot be played.
+func refusedByTheSource(err error) bool {
+	var coded *codedError
+	if !errors.As(err, &coded) {
+		return false
+	}
+	msg := strings.ToLower(coded.msg)
+	return strings.Contains(msg, "403") || strings.Contains(msg, "forbidden")
 }
 
 // writeMaster writes the playlist that joins the two variants. Written here
