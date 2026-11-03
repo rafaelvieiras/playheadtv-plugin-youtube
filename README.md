@@ -67,8 +67,15 @@ then install the plugin and leave it enabled (`POST /plugins/youtube/install` in
 the REST API, or the `install_plugin` MCP tool).
 
 Each artifact is self-contained: the plugin binary, the extractor it drives
-(`yt-dlp`) and the remuxer it may use (`ffmpeg`). Nothing is installed on the
+(`yt-dlp`), the remuxer it may use (`ffmpeg`) and the JavaScript runtime the
+extractor solves signature challenges with (`deno`). Nothing is installed on the
 host system.
+
+The runtime is not optional in practice: the extractor states that extraction
+without a JavaScript runtime is deprecated, and a plugin process has no `PATH`
+for it to find one on, so it is passed explicitly (`--js-runtimes deno:<dir>`). A
+missing runtime is not fatal — the extractor lists and resolves less, it does not
+fail.
 
 ## Configure a source
 
@@ -128,9 +135,9 @@ Outputs `dist/plugin-youtube-<os>-<arch>.tar.gz` and `dist/registry.json` with a
 SHA-256 per artifact. The release workflow does exactly this on a tag and
 publishes both, so the registry can never describe bytes that were not released.
 
-Artifacts are large (~115 MB) because they carry an `ffmpeg` build. Only remuxing
-uses it, and only a minimal build would be enough; a slimmer artifact is a
-possible follow-up.
+Artifacts are large (~150 MB) because they carry an `ffmpeg` build and a
+JavaScript runtime. Only remuxing uses `ffmpeg`, and only a minimal build would
+be enough; a slimmer artifact is a possible follow-up.
 
 The remuxer is a BtbN static build, not johnvansickle's: that one segfaults on the
 media URLs an extractor hands out (every item of a real playlist reproduced it),

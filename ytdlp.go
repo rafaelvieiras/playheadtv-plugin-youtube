@@ -18,9 +18,71 @@ import (
 // The environment overrides exist for tests and for a developer running the
 // binary straight out of a source checkout.
 const (
-	envExtractor = "PLAYHEADTV_PLUGIN_EXTRACTOR"
-	envRemuxer   = "PLAYHEADTV_PLUGIN_REMUXER"
+	envExtractor  = "PLAYHEADTV_PLUGIN_EXTRACTOR"
+	envRemuxer    = "PLAYHEADTV_PLUGIN_REMUXER"
+	envJSRuntime  = "PLAYHEADTV_PLUGIN_JS_RUNTIME"
+	jsRuntimeName = "deno"
 )
+
+// jsRuntimeDir is where the JavaScript runtime the artifact ships lives, or ""
+// when the artifact has none (a source checkout without one, a platform the
+// build does not package).
+//
+// The extractor solves the site's signature challenges in JavaScript, and
+// without a runtime it says so and degrades: some formats disappear, and the
+// ones left are the ones a player is more likely to be refused on. It finds a
+// runtime on PATH by itself, which a plugin process does not have — hence the
+// explicit path below.
+func jsRuntimeDir() string {
+	dir, err := bundledDir(envJSRuntime, jsRuntimeName)
+	if err != nil {
+		return ""
+	}
+	return dir
+}
+
+// bundledDir is bundled() for a program that is passed to the extractor by the
+// directory holding it. An override may name either the program or its
+// directory.
+func bundledDir(envVar, name string) (string, error) {
+	if override := os.Getenv(envVar); override != "" {
+		info, err := os.Stat(override)
+		if err != nil {
+			return "", err
+		}
+		if info.IsDir() {
+			return override, nil
+		}
+		return filepath.Dir(override), nil
+	}
+	path, err := bundled("", name)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Dir(path), nil
+}
+
+// jsRuntimeCacheDir gives the runtime a cache it can write. It wants one per
+// process user, and a container may have no HOME at all, which fails the first
+// run with a permission error that looks like the runtime is missing.
+func jsRuntimeCacheDir() string {
+	return filepath.Join(os.TempDir(), "playheadtv-plugin-js")
+}
+
+// withJSRuntime enables the shipped runtime on every extractor call. A missing
+// runtime is not fatal: the extractor works without one, just worse, and a
+// plugin that refused to list anything because a helper was absent would be
+// worse still.
+func withJSRuntime(cmd command) command {
+	dir := jsRuntimeDir()
+	if dir == "" {
+		return cmd
+	}
+	runtime := jsRuntimeName + ":" + dir
+	return func(ctx context.Context, stdin []byte, args ...string) ([]byte, error) {
+		return cmd(ctx, stdin, append([]string{"--js-runtimes", runtime}, args...)...)
+	}
+}
 
 // bundled returns the path of a helper program shipped in the artifact.
 func bundled(envVar, name string) (string, error) {
@@ -54,6 +116,9 @@ func runHelper(bin string) command {
 		if stdin != nil {
 			cmd.Stdin = bytes.NewReader(stdin)
 		}
+		// Harmless for the remuxer and necessary for the runtime: see
+		// jsRuntimeCacheDir.
+		cmd.Env = append(os.Environ(), "DENO_DIR="+jsRuntimeCacheDir())
 		if err := cmd.Run(); err != nil {
 			return stdout.Bytes(), &helperError{err: err, stderr: stderr.String()}
 		}

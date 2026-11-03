@@ -2,9 +2,10 @@
 # Builds one download artifact per platform and the registry document that lists
 # them (docs/PLUGINS.md in the Playhead TV repo).
 #
-# Each artifact is self-contained: the plugin binary, the extractor it drives and
-# the remuxer it may use. Installing the plugin is the only step a host takes; it
-# never installs a system package.
+# Each artifact is self-contained: the plugin binary, the extractor it drives, the
+# remuxer it may use and the JavaScript runtime the extractor solves signature
+# challenges with. Installing the plugin is the only step a host takes; it never
+# installs a system package.
 #
 #   ./build.sh                    # build every target
 #   VERSION=2026.10.26 ./build.sh # name the release explicitly
@@ -26,6 +27,10 @@ OUT=${OUT:-dist}
 EXTRACTOR_BASE=${EXTRACTOR_BASE:-https://github.com/yt-dlp/yt-dlp/releases/latest/download}
 REMUXER_BASE=${REMUXER_BASE:-https://github.com/BtbN/FFmpeg-Builds/releases/download/latest}
 REMUXER_WINDOWS=${REMUXER_WINDOWS:-$REMUXER_BASE/ffmpeg-master-latest-win64-gpl.zip}
+# Pinned, not "latest": the runtime is part of what the artifact promises to do,
+# and a release must stay reproducible after upstream publishes a new one.
+JS_RUNTIME_BASE=${JS_RUNTIME_BASE:-https://github.com/denoland/deno/releases/download}
+JS_RUNTIME_VERSION=${JS_RUNTIME_VERSION:-v2.9.8}
 
 mkdir -p "$CACHE" "$OUT"
 
@@ -52,6 +57,25 @@ unpack_remuxer() {
 		;;
 	esac
 	chmod 0755 "$dest"
+}
+
+# unpack_js_runtime <os> <arch> <stage> <ext>
+# The extractor looks the runtime up by name next to itself, so it is staged flat
+# like every other helper.
+unpack_js_runtime() {
+	os=$1
+	arch=$2
+	stage=$3
+	ext=$4
+	case $os in
+	linux) triple="$([ "$arch" = amd64 ] && echo x86_64 || echo aarch64)-unknown-linux-gnu" ;;
+	windows) triple="x86_64-pc-windows-msvc" ;;
+	*) echo "no JavaScript runtime for $os/$arch" >&2; exit 1 ;;
+	esac
+	archive="$CACHE/deno-$os-$arch.zip"
+	fetch "$JS_RUNTIME_BASE/$JS_RUNTIME_VERSION/deno-$triple.zip" "$archive"
+	unzip -o -j "$archive" "deno$ext" -d "$stage" >/dev/null
+	chmod 0755 "$stage/deno$ext"
 }
 
 manifest() {
@@ -98,12 +122,14 @@ build_target() {
 		fetch "$REMUXER_BASE/ffmpeg-master-latest-linux$([ "$arch" = amd64 ] && echo 64 || echo arm64)-gpl.tar.xz" \
 			"$CACHE/ffmpeg-linux-$arch.tar.xz"
 		unpack_remuxer "$CACHE/ffmpeg-linux-$arch.tar.xz" "*/bin/ffmpeg" "$stage/ffmpeg"
+		unpack_js_runtime linux "$arch" "$stage" ""
 		;;
 	windows)
 		fetch "$EXTRACTOR_BASE/yt-dlp.exe" "$CACHE/yt-dlp-windows-amd64.exe"
 		cp "$CACHE/yt-dlp-windows-amd64.exe" "$stage/yt-dlp.exe"
 		fetch "$REMUXER_WINDOWS" "$CACHE/ffmpeg-windows-amd64.zip"
 		unpack_remuxer "$CACHE/ffmpeg-windows-amd64.zip" "*/bin/ffmpeg.exe" "$stage/ffmpeg.exe"
+		unpack_js_runtime windows amd64 "$stage" ".exe"
 		;;
 	*)
 		echo "unsupported target $os/$arch" >&2

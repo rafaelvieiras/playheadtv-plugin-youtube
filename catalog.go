@@ -120,7 +120,7 @@ func newCatalog() *catalog {
 }
 
 // init wires the extractor, which is only known once the artifact is located.
-func (c *catalog) init(extractor string) { c.cmd = runHelper(extractor) }
+func (c *catalog) init(extractor string) { c.cmd = withJSRuntime(runHelper(extractor)) }
 
 type listParams struct {
 	Config json.RawMessage `json:"config"`
