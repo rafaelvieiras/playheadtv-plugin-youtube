@@ -5,5 +5,52 @@
   "version": "0.1.0",
   "protocol": 1,
   "entrypoint": "playheadtv-plugin-youtube",
-  "capabilities": ["catalog.list", "media.resolve"]
+  "capabilities": ["catalog.list", "media.resolve"],
+  "config": [
+    {
+      "key": "url",
+      "label": "Source",
+      "type": "text",
+      "help": "A channel, a playlist or a single video."
+    },
+    {
+      "key": "kind",
+      "label": "Kind",
+      "type": "choice",
+      "options": [
+        {"value": "auto", "label": "Detect automatically"},
+        {"value": "channel", "label": "Channel"},
+        {"value": "playlist", "label": "Playlist"},
+        {"value": "video", "label": "Single video"}
+      ]
+    },
+    {
+      "key": "max_height",
+      "label": "Quality",
+      "type": "choice",
+      "help": "The tallest the stream may be. A shorter one is used when the video does not have it.",
+      "options": [
+        {"value": "1080", "label": "1080p"},
+        {"value": "720", "label": "720p"},
+        {"value": "480", "label": "480p"},
+        {"value": "360", "label": "360p"}
+      ]
+    },
+    {
+      "key": "max_items",
+      "label": "Items to list",
+      "type": "number",
+      "help": "How many videos of the source to keep, newest first."
+    },
+    {
+      "key": "include_shorts",
+      "label": "Include shorts",
+      "type": "bool"
+    },
+    {
+      "key": "audio_only",
+      "label": "Audio only",
+      "type": "bool"
+    }
+  ]
 }

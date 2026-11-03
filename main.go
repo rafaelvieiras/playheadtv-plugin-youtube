@@ -39,6 +39,23 @@ type Manifest struct {
 	Protocol     int      `json:"protocol"`
 	Entrypoint   string   `json:"entrypoint"`
 	Capabilities []string `json:"capabilities"`
+	// Config is echoed from plugin.json: the settings a source of this plugin
+	// takes, so the host can build the screen without knowing any of them.
+	Config []manifestField `json:"config,omitempty"`
+}
+
+// manifestField is one declared setting (protocol 1, "config").
+type manifestField struct {
+	Key     string           `json:"key"`
+	Label   string           `json:"label"`
+	Type    string           `json:"type"`
+	Options []manifestChoice `json:"options,omitempty"`
+	Help    string           `json:"help,omitempty"`
+}
+
+type manifestChoice struct {
+	Value string `json:"value"`
+	Label string `json:"label"`
 }
 
 type request struct {
