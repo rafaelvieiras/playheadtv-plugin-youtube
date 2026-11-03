@@ -38,6 +38,18 @@ import (
 // length it cannot know, because its MP4 reader has to seek back after sniffing
 // (reproduced: "Source error", no detail). A playlist per track it can read.
 
+// ipv4Only pins the remuxer's own connection to IPv4, and it is load-bearing on
+// a dual-stack host. The extractor is forced to IPv4 (`-4`: the site challenges
+// IPv6 with "Sign in to confirm you're not a bot", and a challenge is not
+// retryable), so the media URL it hands out carries `ip=<that address>`; the CDN
+// then refuses a request that arrives from any other address, over IPv6 with a
+// bare "403 Forbidden". ffmpeg prefers IPv6 where the host has it, and the remux
+// died on its first read while the same URL worked when the extractor fetched it.
+// A local address of 0.0.0.0 makes ffmpeg open an IPv4 socket (it tries the IPv6
+// candidate, cannot bind it, and falls through), which matches the URL it was
+// given.
+var ipv4Only = []string{"-local_addr", "0.0.0.0"}
+
 // streamEvictIdle is how quiet a stream must be before a new resolve may take its
 // place when the pool is full. Long enough to never break playback that is
 // merely thinking (a player rebuffering), short enough that a handful of
@@ -229,6 +241,7 @@ func (s *streams) start(params streamParams) ([]*process, error) {
 		}
 		args := []string{"-hide_banner", "-nostdin", "-loglevel", "error", "-y"}
 		args = append(args, headerArgs(params.headers)...)
+		args = append(args, ipv4Only...)
 		if params.startAt > 0 {
 			args = append(args, "-ss", strconv.FormatFloat(params.startAt, 'f', 3, 64))
 		}
@@ -743,6 +756,7 @@ func (s *streams) keyframeAt(ctx context.Context, inputs []remuxInput, target fl
 	args := []string{"-hide_banner", "-nostdin", "-loglevel", "info", "-copyts",
 		"-ss", strconv.FormatFloat(from, 'f', 3, 64), "-noaccurate_seek"}
 	args = append(args, headerArgs(headers)...)
+	args = append(args, ipv4Only...)
 	args = append(args, "-i", video, "-map", "0:v:0", "-skip_frame", "nokey",
 		"-vf", "showinfo", "-frames:v", "1", "-f", "null", "-")
 	// Combined output on purpose: ffmpeg writes the filter report to stderr and
