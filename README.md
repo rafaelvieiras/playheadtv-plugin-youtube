@@ -8,6 +8,29 @@ It implements the plugin contract in `docs/PLUGINS.md` (in the Playhead TV
 repository): protocol 1, one JSON object per line over stdin/stdout, capabilities
 `catalog.list` and `media.resolve`.
 
+`plugin.json` also declares the settings a source of this plugin takes
+(`config`, "Declared settings" in the same document), so a host can draw the
+settings screen from the plugin's own description. The artifact's manifest is
+generated from the checked-in `plugin.json` — one description, not two.
+
+## What a tune-in costs
+
+Measured against a 41-minute video on the deployment this was written for,
+because every one of these numbers was worth fixing:
+
+| step | cost | why it is that |
+| --- | --- | --- |
+| resolving | 5-9s the first time, 0s after | the extractor runs once per item and its answer (a list of signed urls, not media) is kept for ten minutes |
+| finding the keyframe to cut both tracks on | ~1s | one `ffmpeg` probe that decodes a single frame |
+| the remux producing its first segment | 4-5s | two `ffmpeg` processes seek into the source and cut a **two-second** first segment (`-hls_init_time`), which is what the player waits for; the rest are six seconds |
+
+So a first tune-in spends ~11s and coming back to the same item ~5s. What is
+*not* in that table is the biggest lever: a second resolve of the same item
+inside the cache window costs nothing at all, which is what makes a channel
+change tolerable. `resolve` and `stream ready` log their own timings into
+`$TMPDIR/playheadtv-yt-requests.log`, so a regression shows up as a number
+instead of a feeling.
+
 ## What it deliberately does not do
 
 **No transcoding, ever.** The plugin never decodes or re-encodes video. Which
