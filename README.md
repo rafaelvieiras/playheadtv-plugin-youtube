@@ -79,6 +79,17 @@ instant:
 A player can only move forward through the playlist; the client re-resolves at the
 position it needs.
 
+**A failure that says nothing about the item is tried again**, up to three times
+with a two-second pause between: the source refusing one read (a freshly resolved
+url answers 403 on one of its nodes and works seconds later), a read timing out
+(`-rw_timeout` bounds a single read, so a dead connection aborts the remux instead
+of hanging it), or a remux that opened the source and then wrote nothing for
+twelve seconds. That last one is not hypothetical: measured on 2026-11-03, a first
+resolve sat silent for the whole sixty-second timeout while the identical request
+answered in five seconds when tried again. A remux that is working grows its files
+continuously and one stuck on a dead connection grows nothing, so the plugin
+watches the bytes on disk instead of guessing.
+
 ## Install
 
 The host installs plugins from a registry. Point it at this repository's

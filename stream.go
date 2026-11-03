@@ -82,6 +82,20 @@ const hlsFirstSegmentSeconds = 2
 // the requested offset, so this is "however long the site takes to answer".
 const streamReadyTimeout = 60 * time.Second
 
+// remuxStallBound is how long a remux may write nothing at all before it counts
+// as stuck rather than slow. Measured: a healthy remux puts its first bytes on
+// disk within a second or two of starting (a couple more for a deep seek).
+// Waiting the whole [streamReadyTimeout] for a process that will never write
+// only delays the retry that does work (reproduced: the first resolve of an item
+// sat silent for the full minute, and the identical request answered in five
+// seconds when tried again).
+const remuxStallBound = 12 * time.Second
+
+// rwTimeoutMicros bounds a single read from the source, so a connection that
+// stops answering aborts the remux instead of hanging it forever (ffmpeg waits
+// indefinitely by default). Microseconds, as ffmpeg's AVOption expects.
+const rwTimeoutMicros = 15_000_000
+
 // playlistReadAttempts bounds how long a half-written playlist is waited for.
 const playlistReadAttempts = 25
 
@@ -102,6 +116,8 @@ type streams struct {
 	srv     *http.Server
 	remuxer string
 	clock   func() time.Time
+	// stallBound is [remuxStallBound]; a field so a test can shorten it.
+	stallBound time.Duration
 }
 
 // streamParams is what a token stands for: enough to start the same stream
@@ -146,10 +162,11 @@ func newStreams() (*streams, error) {
 	// "[::]:port" or "0.0.0.0:port", which no player can open. A host that is not on
 	// this machine rewrites the host part of the URL it hands out.
 	s := &streams{
-		byToken: map[string]*stream{},
-		baseURL: "http://127.0.0.1:" + strconv.Itoa(lf.Addr().(*net.TCPAddr).Port) + "/s/",
-		lf:      lf,
-		clock:   time.Now,
+		byToken:    map[string]*stream{},
+		baseURL:    "http://127.0.0.1:" + strconv.Itoa(lf.Addr().(*net.TCPAddr).Port) + "/s/",
+		lf:         lf,
+		clock:      time.Now,
+		stallBound: remuxStallBound,
 	}
 	s.srv = &http.Server{Handler: s, ReadHeaderTimeout: 10 * time.Second}
 	go func() { _ = s.srv.Serve(lf) }()
@@ -206,21 +223,26 @@ func (s *streams) open(ctx context.Context, inputs []remuxInput, startAt float64
 		lastUse: s.clock(),
 	}
 	var procs []*process
-	for attempt := 0; attempt < refusedReadAttempts; attempt++ {
+	for attempt := 0; attempt < streamAttempts; attempt++ {
 		if attempt > 0 {
-			// A refusal is not a verdict. The source answers 403 for a freshly
-			// resolved url on one of its nodes and serves the very same url a few
-			// seconds later (measured: the url it had just refused opened five
-			// seconds after, from the same machine and the same address). From
-			// here the two look identical, so trying again tells them apart — and
-			// the pause is the load-bearing part: retrying at once hits the same
-			// node and is refused again.
-			time.Sleep(refusedReadPause)
+			// Neither answer is a verdict about the item. The source refuses a
+			// freshly resolved url on one of its nodes and serves the very same url a
+			// few seconds later (measured: the url it had just refused opened five
+			// seconds after, from the same machine and the same address), and a remux
+			// can open the source and then write nothing at all for a minute. From
+			// here the two look alike, so trying again tells them apart, and the pause
+			// is the load-bearing part: retrying at once hits the same node and is
+			// refused, or stalls, again.
+			time.Sleep(streamRetryPause)
 		}
 		procs, err = s.start(st.params)
-		if err == nil || !refusedByTheSource(err) {
+		if err == nil {
 			break
 		}
+		if !retryableStreamFailure(err) {
+			break
+		}
+		requestLog(nil, "stream: attempt "+strconv.Itoa(attempt+1)+" failed, trying again: "+err.Error(), 0, 0)
 	}
 	if err != nil {
 		return nil, err
@@ -265,6 +287,9 @@ func (s *streams) start(params streamParams) ([]*process, error) {
 		args := []string{"-hide_banner", "-nostdin", "-loglevel", "error", "-y"}
 		args = append(args, headerArgs(params.headers)...)
 		args = append(args, ipv4Only...)
+		// Bounds one read from the source: without it a connection that stops
+		// answering hangs the remux for as long as the host is willing to wait.
+		args = append(args, "-rw_timeout", strconv.Itoa(rwTimeoutMicros))
 		if params.startAt > 0 {
 			args = append(args, "-ss", strconv.FormatFloat(params.startAt, 'f', 3, 64))
 		}
@@ -320,7 +345,7 @@ func (s *streams) start(params streamParams) ([]*process, error) {
 		os.RemoveAll(dir)
 		return nil, err
 	}
-	if err := waitReady(dir, procs, streamReadyTimeout); err != nil {
+	if err := waitReady(dir, procs, streamReadyTimeout, s.stallBound); err != nil {
 		stopAll(procs)
 		os.RemoveAll(dir)
 		return nil, err
@@ -328,23 +353,31 @@ func (s *streams) start(params streamParams) ([]*process, error) {
 	return procs, nil
 }
 
-// How a refused first read is retried before it counts as the item's problem.
+// How a failed first read is retried before it counts as the item's problem.
 // Two pauses of two seconds stay well inside the resolve budget the host allows
 // and cover the window in which the source was measured to answer differently.
 const (
-	refusedReadAttempts = 3
-	refusedReadPause    = 2 * time.Second
+	streamAttempts   = 3
+	streamRetryPause = 2 * time.Second
 )
 
-// refusedByTheSource reports a failure the source answered with a refusal, rather
-// than one that says the item itself cannot be played.
-func refusedByTheSource(err error) bool {
+// retryableStreamFailure reports a failure that says nothing about the item:
+// the source refused this read (403), a read timed out, or the remux opened the
+// source and then wrote nothing. All three were measured to answer differently
+// when tried again seconds later, and none of them is a verdict the host can act
+// on by itself.
+func retryableStreamFailure(err error) bool {
 	var coded *codedError
 	if !errors.As(err, &coded) {
 		return false
 	}
 	msg := strings.ToLower(coded.msg)
-	return strings.Contains(msg, "403") || strings.Contains(msg, "forbidden")
+	for _, sign := range []string{"403", "forbidden", "timed out", "timeout", "wrote nothing"} {
+		if strings.Contains(msg, sign) {
+			return true
+		}
+	}
+	return false
 }
 
 // writeMaster writes the playlist that joins the two variants. Written here
@@ -370,11 +403,22 @@ func stopAll(procs []*process) {
 
 // waitReady blocks until both variant playlists list a segment, so the host never
 // hands its player a URL that has nothing behind it.
-func waitReady(dir string, procs []*process, timeout time.Duration) error {
+func waitReady(dir string, procs []*process, timeout, stallBound time.Duration) error {
 	deadline := time.Now().Add(timeout)
+	var written int64 = -1
+	progressed := time.Now()
 	for time.Now().Before(deadline) {
 		if listed(dir, videoVariant) && listed(dir, audioVariant) {
 			return nil
+		}
+		// A remux that is working grows its files continuously; one stuck on a
+		// dead connection grows nothing. Telling the two apart here is what keeps
+		// a viewer from waiting the whole timeout for a process that will never
+		// write (see [remuxStallBound]).
+		if size := dirBytes(dir); size != written {
+			written, progressed = size, time.Now()
+		} else if stallBound > 0 && time.Since(progressed) >= stallBound {
+			return errf(codeUnavailable, "the remux wrote nothing for %s", stallBound)
 		}
 		alive := false
 		for _, proc := range procs {
@@ -403,6 +447,25 @@ func waitReady(dir string, procs []*process, timeout time.Duration) error {
 func listed(dir, variant string) bool {
 	body, err := os.ReadFile(filepath.Join(dir, variant, "index.m3u8"))
 	return err == nil && strings.Contains(string(body), "#EXTINF")
+}
+
+// dirBytes sums what the remux has written so far, so waitReady can tell a slow
+// remux from a stuck one. Unreadable entries count as zero: this only measures
+// progress.
+func dirBytes(dir string) int64 {
+	var total int64
+	for _, variant := range []string{videoVariant, audioVariant} {
+		entries, err := os.ReadDir(filepath.Join(dir, variant))
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if info, err := entry.Info(); err == nil {
+				total += info.Size()
+			}
+		}
+	}
+	return total
 }
 
 // markExited records that the remux ended, keeping the last of its diagnostic

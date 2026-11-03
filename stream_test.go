@@ -123,6 +123,31 @@ func TestASourceRefusalIsTriedAgain(t *testing.T) {
 	}
 }
 
+// A remux can open the source and then write nothing at all: a connection that
+// stopped answering. Waiting the whole timeout for it costs the viewer a minute,
+// so a silent process is restarted instead (reproduced 2026-11-03: the first
+// resolve of an item sat silent for the full 60s, and the identical request
+// answered in five seconds when tried again).
+func TestARemuxThatWritesNothingIsTriedAgain(t *testing.T) {
+	s, err := newStreams()
+	if err != nil {
+		t.Fatalf("newStreams: %v", err)
+	}
+	defer s.close()
+
+	marker := filepath.Join(t.TempDir(), "stalled")
+	s.remuxer = fakeStallingRemuxerOnce(t, marker)
+	s.stallBound = 400 * time.Millisecond
+
+	started := time.Now()
+	if _, err := s.open(context.Background(), []remuxInput{{url: "https://example.invalid/v", selector: "v"}, {url: "https://example.invalid/a", selector: "a"}}, 0, nil); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 20*time.Second {
+		t.Fatalf("open took %s, want the stall noticed long before the 60s timeout", elapsed)
+	}
+}
+
 // A refusal that keeps happening is the item's problem, and the second try is
 // the last one: the caller has a channel to keep running.
 func TestASourceRefusalIsNotRetriedForever(t *testing.T) {
@@ -251,6 +276,31 @@ exit 8
 `
 	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
 		t.Fatalf("write the refusing remuxer: %v", err)
+	}
+	return path
+}
+
+// fakeStallingRemuxerOnce opens nothing and writes nothing on its first run, the
+// way a remux does when its connection stops answering, and behaves afterwards.
+func fakeStallingRemuxerOnce(t *testing.T, marker string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "stalling-once-remuxer")
+	script := `#!/bin/sh
+if [ ! -f "` + marker + `" ]; then
+  : > "` + marker + `"
+  sleep 30
+  exit 0
+fi
+playlist=""
+for last; do playlist="$last"; done
+dir=$(dirname "$playlist")
+mkdir -p "$dir"
+printf '#EXTM3U\n#EXTINF:6.0,\nseg00000.m4s\n' > "$playlist"
+printf 'segment' > "$dir/seg00000.m4s"
+sleep 30
+`
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+		t.Fatalf("write the stalling remuxer: %v", err)
 	}
 	return path
 }
