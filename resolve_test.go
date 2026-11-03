@@ -245,6 +245,63 @@ func TestResolveAsksForWhatTheHostCanPlay(t *testing.T) {
 		}
 	})
 
+	// A muxed file is the best answer for a host that accepts `single`, but a host
+	// that only accepts `remux` needs the tracks beside it. Planning only the
+	// muxed file left that host with no plan at all, and the item unplayable
+	// while its own separate tracks were right there.
+	t.Run("a muxed file does not hide the tracks from a remuxing host", func(t *testing.T) {
+		srv := testServer(t, fakeExtractor("testdata/channel-listing.json", nil))
+		srv.streams.remuxer = fakeHLSRemuxer(t)
+		srv.catalog.cmd = func(ctx context.Context, stdin []byte, args ...string) ([]byte, error) {
+			return []byte(`{"id":"x","duration":10,"formats":[
+				{"format_id":"18","ext":"mp4","vcodec":"avc1","acodec":"mp4a","height":360,"tbr":500,"protocol":"https","url":"https://cdn.example.test/18?expire=1793602656"},
+				{"format_id":"136","ext":"mp4","vcodec":"avc1","height":720,"tbr":2000,"protocol":"https","url":"https://cdn.example.test/136?expire=1793602656"},
+				{"format_id":"140","ext":"m4a","acodec":"mp4a","abr":128,"protocol":"https","url":"https://cdn.example.test/140?expire=1793602656"}]}`), nil
+		}
+		body, rpcErr := call(t, srv, "media.resolve", map[string]any{
+			"config": config,
+			"item":   map[string]any{"external_id": "sO_lhW8av3U", "duration_ms": 149000},
+			"modes":  []string{"remux"},
+		})
+		if rpcErr != nil {
+			t.Fatalf("resolve: %s", rpcErr.Message)
+		}
+		var result resolveResult
+		if err := json.Unmarshal(body, &result); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if result.Mode != modeRemux {
+			t.Fatalf("mode = %q, want %q", result.Mode, modeRemux)
+		}
+	})
+
+	// The height cap is a preference. An item whose smallest format is above it
+	// still has to play: a hole in the channel is worse than a bigger stream.
+	t.Run("an item taller than the cap still plays", func(t *testing.T) {
+		srv := testServer(t, fakeExtractor("testdata/channel-listing.json", nil))
+		srv.streams.remuxer = fakeHLSRemuxer(t)
+		srv.catalog.cmd = func(ctx context.Context, stdin []byte, args ...string) ([]byte, error) {
+			return []byte(`{"id":"x","duration":10,"formats":[
+				{"format_id":"299","ext":"mp4","vcodec":"avc1","height":1080,"tbr":6000,"protocol":"https","url":"https://cdn.example.test/299?expire=1793602656"},
+				{"format_id":"140","ext":"m4a","acodec":"mp4a","abr":128,"protocol":"https","url":"https://cdn.example.test/140?expire=1793602656"}]}`), nil
+		}
+		body, rpcErr := call(t, srv, "media.resolve", map[string]any{
+			"config": config,
+			"item":   map[string]any{"external_id": "sO_lhW8av3U", "duration_ms": 149000},
+			"modes":  []string{"remux"},
+		})
+		if rpcErr != nil {
+			t.Fatalf("resolve: %s", rpcErr.Message)
+		}
+		var result resolveResult
+		if err := json.Unmarshal(body, &result); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if result.Mode != modeRemux {
+			t.Fatalf("mode = %q, want %q", result.Mode, modeRemux)
+		}
+	})
+
 	t.Run("remux when the host asks", func(t *testing.T) {
 		srv := testServer(t, fakeExtractor("testdata/channel-listing.json", nil))
 		// A remux runs the bundled remuxer; stub it so the test needs no ffmpeg.

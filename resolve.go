@@ -268,25 +268,34 @@ func planPlayback(info mediaInfo, cfg sourceConfig) (playbackPlan, error) {
 		return playbackPlan{}, errf(codeNotFound, "no audio stream for %s", info.ID)
 	}
 
-	if muxed := bestMuxed(info.Formats); muxed != nil {
-		return playbackPlan{direct: muxed, headers: headers}, nil
-	}
-
 	maxHeight := cfg.MaxHeight
 	if maxHeight <= 0 {
 		maxHeight = 720
 	}
+	// The tracks beside the muxed file are kept even when a muxed file exists:
+	// a host that does not accept `single` (the client cannot merge, so it asks
+	// for `remux`) would otherwise be left with a plan it cannot use at all — an
+	// item whose only progressive format is 360p muxed became unplayable while
+	// the same item's separate tracks were right there.
 	video := bestVideo(info.Formats, maxHeight)
 	audio := bestAudio(info.Formats)
-	if video == nil || audio == nil {
+	plan := playbackPlan{direct: bestMuxed(info.Formats), video: video, audio: audio, headers: headers}
+	if video != nil && audio != nil {
+		plan.headers = pickHeaders(video, audio, headers)
+	}
+	if plan.direct != nil {
+		return plan, nil
+	}
+	if plan.video == nil || plan.audio == nil {
 		// Audio-only content, or a video with no separate audio track: play
 		// whatever single stream exists rather than nothing.
 		if only := firstPlayable(info.Formats); only != nil {
-			return playbackPlan{direct: only, headers: headers}, nil
+			plan.direct = only
+			return plan, nil
 		}
 		return playbackPlan{}, errf(codeNotFound, "no playable stream for %s", info.ID)
 	}
-	return playbackPlan{video: video, audio: audio, headers: pickHeaders(video, audio, headers)}, nil
+	return plan, nil
 }
 
 func usable(f mediaFormat) bool {
@@ -340,7 +349,9 @@ func hasAudio(f mediaFormat) bool { return f.ACodec != "" && f.ACodec != "none" 
 
 // bestVideo prefers a codec every engine decodes, then the tallest stream within
 // the cap, then the highest bitrate.
-func bestVideo(formats []mediaFormat, maxHeight int) *mediaFormat {
+// videoCandidates lists the formats that carry video alone and fit the height
+// cap (no cap when maxHeight is zero or less).
+func videoCandidates(formats []mediaFormat, maxHeight int) []mediaFormat {
 	var candidates []mediaFormat
 	for _, f := range formats {
 		if !usable(f) || !hasVideo(f) || hasAudio(f) {
@@ -350,6 +361,28 @@ func bestVideo(formats []mediaFormat, maxHeight int) *mediaFormat {
 			continue
 		}
 		candidates = append(candidates, f)
+	}
+	return candidates
+}
+
+func bestVideo(formats []mediaFormat, maxHeight int) *mediaFormat {
+	candidates := videoCandidates(formats, maxHeight)
+	if len(candidates) == 0 && maxHeight > 0 {
+		// Nothing fits the cap. The cap is a bandwidth preference, not a
+		// capability: an item whose lowest format is above it is still better
+		// played than left as a hole in the channel, and the smallest of those is
+		// the closest to what was asked for.
+		candidates = videoCandidates(formats, 0)
+		smallest := -1
+		for i := range candidates {
+			if smallest < 0 || candidates[i].Height < candidates[smallest].Height {
+				smallest = i
+			}
+		}
+		if smallest < 0 {
+			return nil
+		}
+		return &candidates[smallest]
 	}
 	if len(candidates) == 0 {
 		return nil
