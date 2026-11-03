@@ -186,7 +186,7 @@ func (s *streams) open(ctx context.Context, inputs []remuxInput, startAt float64
 		params:  streamParams{inputs: inputs, startAt: startAt, headers: headers},
 		lastUse: s.clock(),
 	}
-	proc, err := s.start(ctx, st.params)
+	proc, err := s.start(st.params)
 	if err != nil {
 		return nil, err
 	}
@@ -202,7 +202,7 @@ func (s *streams) url(st *stream) string { return s.baseURL + st.token + "/" + m
 
 // start launches one remux writing a fragmented MP4 to a pipe, and reads enough
 // of it to know the source works.
-func (s *streams) start(ctx context.Context, params streamParams) (*process, error) {
+func (s *streams) start(params streamParams) (*process, error) {
 	dir, err := os.MkdirTemp("", "playheadtv-yt-")
 	if err != nil {
 		return nil, fmt.Errorf("create stream directory: %w", err)
@@ -252,7 +252,11 @@ func (s *streams) start(ctx context.Context, params streamParams) (*process, err
 		filepath.Join(dir, "%v", "index.m3u8"),
 	)
 
-	cmd := exec.CommandContext(ctx, s.remuxer, args...)
+	// Not CommandContext: the caller's context ends when the resolve answers, and a
+	// remux tied to it was killed one segment later (reproduced: every stream held
+	// exactly one segment and the playlists never grew again). Its life is the
+	// stream's, ended by stop().
+	cmd := exec.Command(s.remuxer, args...)
 	proc := &process{cmd: cmd, dir: dir, stderr: &tailBuffer{}}
 	cmd.Stdout = proc.stderr
 	cmd.Stderr = proc.stderr
