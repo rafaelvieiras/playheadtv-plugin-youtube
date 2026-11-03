@@ -24,7 +24,7 @@ func runningStream(t *testing.T, s *streams, token string, lastUse time.Time) *s
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 	})
-	st := &stream{token: token, lastUse: lastUse, proc: &process{cmd: cmd}}
+	st := &stream{token: token, lastUse: lastUse, procs: []*process{{cmd: cmd}}}
 	s.byToken[token] = st
 	return st
 }
@@ -92,7 +92,7 @@ func TestMakeRoomDropsStreamsWhoseProcessExited(t *testing.T) {
 	if err := done.Run(); err != nil {
 		t.Fatalf("run the stand-in process: %v", err)
 	}
-	s.byToken["dead"] = &stream{token: "dead", lastUse: now, proc: &process{cmd: done}}
+	s.byToken["dead"] = &stream{token: "dead", lastUse: now, procs: []*process{{cmd: done}}}
 
 	evicted, err := s.makeRoom()
 	if err != nil {
@@ -117,7 +117,7 @@ func TestAStreamIsOnePlaylistPerTrack(t *testing.T) {
 	defer s.close()
 	s.remuxer = fakeHLSRemuxer(t)
 
-	st, err := s.open(context.Background(), []remuxInput{{url: "https://example.invalid/v", selector: "v"}}, 0, nil)
+	st, err := s.open(context.Background(), []remuxInput{{url: "https://example.invalid/v", selector: "v"}, {url: "https://example.invalid/a", selector: "a"}}, 0, nil)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -152,7 +152,7 @@ func TestAStreamCannotBeReadOutsideItsOwnDirectory(t *testing.T) {
 	}
 	defer s.close()
 	s.remuxer = fakeHLSRemuxer(t)
-	st, err := s.open(context.Background(), []remuxInput{{url: "https://example.invalid/v", selector: "v"}}, 0, nil)
+	st, err := s.open(context.Background(), []remuxInput{{url: "https://example.invalid/v", selector: "v"}, {url: "https://example.invalid/a", selector: "a"}}, 0, nil)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -169,15 +169,15 @@ func TestAStreamCannotBeReadOutsideItsOwnDirectory(t *testing.T) {
 func fakeHLSRemuxer(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "fake-remuxer")
+	// One process per track now, so each run is handed its own variant's paths and
+	// writes that variant's playlist and one segment.
 	script := `#!/bin/sh
-for last; do out="$last"; done
-dir=$(dirname "$(dirname "$out")")
-mkdir -p "$dir/` + videoVariant + `" "$dir/` + audioVariant + `"
-printf '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1,AUDIO="aud"\n` + videoVariant + `/index.m3u8\n' > "$dir/` + masterPlaylist + `"
-for v in ` + videoVariant + ` ` + audioVariant + `; do
-  printf '#EXTM3U\n#EXTINF:6.0,\nseg00000.m4s\n' > "$dir/$v/index.m3u8"
-  printf 'segment' > "$dir/$v/seg00000.m4s"
-done
+playlist=""
+for last; do playlist="$last"; done
+dir=$(dirname "$playlist")
+mkdir -p "$dir"
+printf '#EXTM3U\n#EXTINF:6.0,\nseg00000.m4s\n' > "$playlist"
+printf 'segment' > "$dir/seg00000.m4s"
 sleep 30
 `
 	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {

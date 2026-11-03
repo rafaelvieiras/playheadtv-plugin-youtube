@@ -103,7 +103,7 @@ type stream struct {
 
 	mu      sync.Mutex
 	lastUse time.Time
-	proc    *process
+	procs   []*process
 }
 
 // process is one running remux and the directory it writes into.
@@ -186,11 +186,11 @@ func (s *streams) open(ctx context.Context, inputs []remuxInput, startAt float64
 		params:  streamParams{inputs: inputs, startAt: startAt, headers: headers},
 		lastUse: s.clock(),
 	}
-	proc, err := s.start(st.params)
+	procs, err := s.start(st.params)
 	if err != nil {
 		return nil, err
 	}
-	st.proc = proc
+	st.procs = procs
 
 	s.mu.Lock()
 	s.byToken[token] = st
@@ -202,105 +202,148 @@ func (s *streams) url(st *stream) string { return s.baseURL + st.token + "/" + m
 
 // start launches one remux writing a fragmented MP4 to a pipe, and reads enough
 // of it to know the source works.
-func (s *streams) start(params streamParams) (*process, error) {
+// start launches one remux per input, each writing its own variant playlist, and
+// writes the master that joins them.
+//
+// One process per track, not one process with two inputs. Sharing a process made
+// the tracks wait for each other: the muxer cuts the video on keyframes (up to a
+// whole GOP apart) and the audio segment beside it is only written at the same
+// moment, so the audio playlist lagged a segment behind the video one and a player
+// following the audio clock stopped at every boundary. Independent processes each
+// read their own source at their own speed.
+func (s *streams) start(params streamParams) ([]*process, error) {
 	dir, err := os.MkdirTemp("", "playheadtv-yt-")
 	if err != nil {
 		return nil, fmt.Errorf("create stream directory: %w", err)
 	}
-	for _, variant := range []string{videoVariant, audioVariant} {
+	var procs []*process
+	for _, in := range params.inputs {
+		variant := videoVariant
+		streamIndex := 0
+		if in.selector == "a" {
+			variant = audioVariant
+			streamIndex = 1
+		}
 		if err := os.MkdirAll(filepath.Join(dir, variant), 0o700); err != nil {
+			stopAll(procs)
 			os.RemoveAll(dir)
 			return nil, fmt.Errorf("create stream directory: %w", err)
 		}
-	}
-
-	args := []string{"-hide_banner", "-nostdin", "-loglevel", "error", "-y"}
-	args = append(args, headerArgs(params.headers)...)
-	for _, in := range params.inputs {
-		// -ss applies to the input that follows it, and input seeking is the
-		// cheap kind.
+		args := []string{"-hide_banner", "-nostdin", "-loglevel", "error", "-y"}
+		args = append(args, headerArgs(params.headers)...)
 		if params.startAt > 0 {
 			args = append(args, "-ss", strconv.FormatFloat(params.startAt, 'f', 3, 64))
 		}
-		args = append(args, "-i", in.url)
+		args = append(args,
+			"-i", in.url,
+			"-map", fmt.Sprintf("%d:%s:0", streamIndex, in.selector),
+			"-c", "copy",
+			"-f", "hls",
+			"-hls_time", strconv.Itoa(hlsSegmentSeconds),
+			// An event playlist: it begins where the host asked and grows to the end
+			// of the item, keeping every segment behind it. A sliding live window
+			// lists one segment at the moment a player opens it, and a player that
+			// follows a live edge has no cushion.
+			"-hls_playlist_type", "event",
+			// Fragmented MP4, not MPEG-TS: the sources are already fMP4, and TS would
+			// make every player reverse a repackaging it never needed.
+			"-hls_segment_type", "fmp4",
+			"-hls_flags", "independent_segments+temp_file",
+			"-hls_segment_filename", filepath.Join(dir, variant, "seg%05d.m4s"),
+			filepath.Join(dir, variant, "index.m3u8"),
+		)
+		// Not CommandContext: the caller's context ends when the resolve answers, and
+		// a remux tied to it was killed one segment later (reproduced). Its life is
+		// the stream's, ended by stop().
+		cmd := exec.Command(s.remuxer, args...)
+		proc := &process{cmd: cmd, dir: dir, stderr: &tailBuffer{}}
+		cmd.Stdout = proc.stderr
+		cmd.Stderr = proc.stderr
+		if err := cmd.Start(); err != nil {
+			stopAll(procs)
+			os.RemoveAll(dir)
+			return nil, fmt.Errorf("start remux: %w", err)
+		}
+		go func() {
+			// The exit is kept, not dropped: a remux that dies while a player watches
+			// leaves a playlist with nothing new in it, which the player shows as a
+			// frozen picture with no error.
+			err := cmd.Wait()
+			proc.markExited(err)
+			if reason, dead := proc.exited(); dead {
+				requestLog(nil, "remux ended: "+reason, 0, 0)
+			}
+		}()
+		procs = append(procs, proc)
 	}
-	for i, in := range params.inputs {
-		args = append(args, "-map", fmt.Sprintf("%d:%s:0", i, in.selector))
-	}
-	args = append(args,
-		"-c", "copy",
-		"-f", "hls",
-		// One playlist per track (a variant stream each) so the muxer's cut points
-		// never have to agree between video and audio. This is the whole point of
-		// the shape; see the file comment.
-		"-var_stream_map", "v:0,agroup:aud,name:"+videoVariant+" a:0,agroup:aud,name:"+audioVariant+",default:yes",
-		"-master_pl_name", masterPlaylist,
-		"-hls_time", strconv.Itoa(hlsSegmentSeconds),
-		// An event playlist: it begins where the host asked and grows to the end of
-		// the item, keeping every segment behind it. A sliding live window lists a
-		// single segment at the moment a player opens it, and a player that follows
-		// a live edge has no cushion.
-		"-hls_playlist_type", "event",
-		// Fragmented MP4, not MPEG-TS: the sources are already fMP4, and TS would
-		// make every player reverse a repackaging it never needed.
-		"-hls_segment_type", "fmp4",
-		"-hls_fmp4_init_filename", "init.mp4",
-		// temp_file: every segment is written under a temporary name and renamed
-		// when complete, so a reader never sees half a segment.
-		"-hls_flags", "independent_segments+temp_file",
-		"-hls_segment_filename", filepath.Join(dir, "%v", "seg%05d.m4s"),
-		filepath.Join(dir, "%v", "index.m3u8"),
-	)
-
-	// Not CommandContext: the caller's context ends when the resolve answers, and a
-	// remux tied to it was killed one segment later (reproduced: every stream held
-	// exactly one segment and the playlists never grew again). Its life is the
-	// stream's, ended by stop().
-	cmd := exec.Command(s.remuxer, args...)
-	proc := &process{cmd: cmd, dir: dir, stderr: &tailBuffer{}}
-	cmd.Stdout = proc.stderr
-	cmd.Stderr = proc.stderr
-	if err := cmd.Start(); err != nil {
+	if err := writeMaster(dir); err != nil {
+		stopAll(procs)
 		os.RemoveAll(dir)
-		return nil, fmt.Errorf("start remux: %w", err)
-	}
-	go func() {
-		// The exit is kept, not dropped: a remux that dies while a player watches
-		// leaves a playlist with nothing new in it, which the player shows as a
-		// frozen picture with no error.
-		err := cmd.Wait()
-		proc.markExited(err)
-	}()
-
-	if err := proc.waitReady(streamReadyTimeout); err != nil {
-		proc.stop()
 		return nil, err
 	}
-	return proc, nil
+	if err := waitReady(dir, procs, streamReadyTimeout); err != nil {
+		stopAll(procs)
+		os.RemoveAll(dir)
+		return nil, err
+	}
+	return procs, nil
+}
+
+// writeMaster writes the playlist that joins the two variants. Written here
+// rather than by the muxer because the muxer only writes one when it produces
+// both variants itself.
+func writeMaster(dir string) error {
+	body := "#EXTM3U\n#EXT-X-VERSION:7\n" +
+		"#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"audio\",DEFAULT=YES,URI=\"" + audioVariant + "/index.m3u8\"\n" +
+		"#EXT-X-STREAM-INF:BANDWIDTH=2000000,AUDIO=\"aud\"\n" +
+		videoVariant + "/index.m3u8\n"
+	path := filepath.Join(dir, masterPlaylist)
+	if err := os.WriteFile(path+".tmp", []byte(body), 0o600); err != nil {
+		return fmt.Errorf("write master playlist: %w", err)
+	}
+	return os.Rename(path+".tmp", path)
+}
+
+func stopAll(procs []*process) {
+	for _, proc := range procs {
+		proc.stop()
+	}
 }
 
 // waitReady blocks until both variant playlists list a segment, so the host never
 // hands its player a URL that has nothing behind it.
-func (p *process) waitReady(timeout time.Duration) error {
+func waitReady(dir string, procs []*process, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		if p.listed(videoVariant) && p.listed(audioVariant) {
+		if listed(dir, videoVariant) && listed(dir, audioVariant) {
 			return nil
 		}
-		if !p.running() {
-			msg := strings.TrimSpace(p.stderr.String())
-			if msg == "" {
-				msg = "remux exited before the first segment"
+		alive := false
+		for _, proc := range procs {
+			if proc.running() {
+				alive = true
 			}
-			return errf(codeUnavailable, "%s", msg)
+		}
+		if !alive {
+			var msg strings.Builder
+			for _, proc := range procs {
+				if detail := strings.TrimSpace(proc.stderr.String()); detail != "" {
+					msg.WriteString(detail)
+					msg.WriteString(" ")
+				}
+			}
+			if msg.Len() == 0 {
+				return errf(codeUnavailable, "remux exited before the first segment")
+			}
+			return errf(codeUnavailable, "%s", strings.TrimSpace(msg.String()))
 		}
 		time.Sleep(150 * time.Millisecond)
 	}
 	return errf(codeUnavailable, "no segment after %s", timeout)
 }
 
-func (p *process) listed(variant string) bool {
-	body, err := os.ReadFile(filepath.Join(p.dir, variant, "index.m3u8"))
+func listed(dir, variant string) bool {
+	body, err := os.ReadFile(filepath.Join(dir, variant, "index.m3u8"))
 	return err == nil && strings.Contains(string(body), "#EXTINF")
 }
 
@@ -351,12 +394,10 @@ func (p *process) stop() {
 // stop kills this stream's remux, if it still has one.
 func (st *stream) stop() {
 	st.mu.Lock()
-	proc := st.proc
-	st.proc = nil
+	procs := st.procs
+	st.procs = nil
 	st.mu.Unlock()
-	if proc != nil {
-		proc.stop()
-	}
+	stopAll(procs)
 }
 
 func (st *stream) paramsCopy() streamParams {
@@ -387,7 +428,12 @@ func (s *streams) makeRoom() (*stream, error) {
 	var stalest *stream
 	for token, st := range s.byToken {
 		st.mu.Lock()
-		alive := st.proc != nil && st.proc.running()
+		alive := false
+		for _, proc := range st.procs {
+			if proc.running() {
+				alive = true
+			}
+		}
 		st.mu.Unlock()
 		if !alive {
 			// A process that already exited holds a slot for nothing.
@@ -466,11 +512,20 @@ func (s *streams) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	st.touch(s.clock())
 
 	st.mu.Lock()
-	proc := st.proc
+	procs := st.procs
 	st.mu.Unlock()
-	if proc == nil {
+	if len(procs) == 0 {
 		http.NotFound(w, r)
 		return
+	}
+	// Either track reports the stream's death: both are the same source.
+	proc := procs[0]
+	for _, p := range procs {
+		if reason, dead := p.exited(); dead {
+			proc = p
+			_ = reason
+			break
+		}
 	}
 
 	// Only the files this plugin wrote, under this stream's own directory: the
