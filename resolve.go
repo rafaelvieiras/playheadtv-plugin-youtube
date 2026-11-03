@@ -166,8 +166,8 @@ func (s *server) resolve(raw json.RawMessage) (any, error) {
 	}
 
 	// The fallback, and the only mode where this process touches media: remux
-	// into one continuous fragmented MP4 body. Never reached unless the host
-	// asked for it.
+	// into HLS, one playlist per track. Never reached unless the host asked for
+	// it.
 	if modes[modeRemux] && len(plan.inputs()) > 0 {
 		st, err := s.streams.open(ctx, plan.inputs(), startAt, plan.headers)
 		if err != nil {

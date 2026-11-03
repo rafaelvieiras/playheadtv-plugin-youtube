@@ -27,28 +27,34 @@ a small machine (a 2 GB set-top box, a single-board computer).
 
 ## How the stream is shaped
 
-The remux answers with **one continuous fragmented MP4 body**, not HLS:
+The remux answers with **HLS, one playlist per track**: `master.m3u8` (written by
+the plugin) points at `v0/index.m3u8` for video and `audio/index.m3u8` for sound,
+and each track gets **its own ffmpeg process**, started with `-ss` at the same
+instant:
 
-- **one body, no segments and no playlist.** With `-c copy` the muxer cannot cut
-  where it wants: the video can only be cut on a keyframe and the audio anywhere,
-  so the two tracks of one stream end up with different boundaries and odd
-  declared durations (measured in one stream: 3.0s, 12.28s and 0.13s, with the
-  audio starting seconds after the video). A player reading that through its own
-  HLS extractor stopped a few seconds into every stream with data still buffered —
-  no error, no buffering flag, one frozen picture. A single body has no
-  boundaries to disagree about.
-- **fragmented MP4 with an empty moov.** The first bytes are playable and nothing
-  has to be finished before it can be read.
-- **backpressure, not a pacing flag.** Nothing paces the remux: it writes into the
-  HTTP response, so when the player stops reading the socket fills, the write
-  blocks and the muxer waits. No `-re`, no live edge to fall off, no disk.
+- **one process per track, never one process for both.** With `-c copy` the muxer
+  cannot cut where it wants: video only on keyframes, audio anywhere. One
+  two-input process therefore declares odd segment durations (measured: 3.0s,
+  12.28s and 0.13s) and lets the audio wait for the video's keyframe rhythm, so
+  the audio variant trails the video one by a segment and a stream can sit at a
+  single segment with no cushion. Independent processes keep each track at its own
+  natural rate.
 - **both inputs cut at the same keyframe.** A probe finds the keyframe the seek
-  lands on and asks the video *and* the audio for exactly that instant. Without it
-  the video keeps its earlier keyframe while the audio is cut at the requested
-  time, and the first seconds of the stream have picture and no sound.
+  lands on and both inputs are asked for exactly that instant. Without it the
+  video keeps its earlier keyframe while the audio is cut at the requested time,
+  and the first seconds of the stream have picture and no sound.
+- **fragmented MP4 segments** (`-hls_segment_type fmp4`) with
+  `independent_segments+temp_file`: every segment starts where a player can join,
+  and a playlist is only ever served once it is complete (ffmpeg rewrites it in
+  place, so a reader can catch it half-written).
+- **an `event` playlist, and nothing paces the remux.** No `-re`: the remux reads
+  ahead as fast as the source allows and the player consumes what it needs.
+- **the remux outlives the resolve.** It runs under a plain `exec.Command`, not
+  `CommandContext` with the resolve caller's context: that context is cancelled
+  the moment the resolve answers, which killed every stream one segment in.
 
-The body only moves forward: a player may not seek it or resume it from an
-offset. The client re-resolves at the position it needs.
+A player can only move forward through the playlist; the client re-resolves at the
+position it needs.
 
 ## Install
 
@@ -110,9 +116,8 @@ tests; a host never sets them.
 `PLAYHEADTV_PLUGIN_LISTEN` moves the remux server off loopback (`0.0.0.0:0` when
 the player is on another machine). The URLs still name `127.0.0.1` and the bound
 port: a host that is not on this machine rewrites the host part of the URL it
-gives its client, and keeps everything else. A `remux` stream is produced at
-playback speed (`-re`), so its sliding window always holds the media the player
-is about to fetch, never a copy that ran ahead of it.
+gives its client, and keeps everything else. The remux reads ahead as fast as the
+source allows; nothing paces it to playback speed.
 
 ## Build
 
@@ -130,7 +135,7 @@ possible follow-up.
 The remuxer is a BtbN static build, not johnvansickle's: that one segfaults on the
 media URLs an extractor hands out (every item of a real playlist reproduced it),
 which surfaced as `remux exited before the first segment` on every play. Verify any
-replacement against a real source URL, with `-re` and two inputs.
+replacement against a real source URL, with a video input and an audio one.
 
 ## Legal
 
