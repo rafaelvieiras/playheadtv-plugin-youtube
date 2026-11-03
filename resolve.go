@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/url"
 	"sort"
 	"strconv"
@@ -123,23 +124,19 @@ func (s *server) resolve(raw json.RawMessage) (any, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
-	watchURL, err := watchURLFor(params.Item.ExternalID)
+	ctx, cancel := context.WithTimeout(context.Background(), resolveProbeTimeout)
+	defer cancel()
+	started := s.now()
+	info, cached, err := s.extract(ctx, params.Item.ExternalID)
 	if err != nil {
 		return nil, err
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), resolveProbeTimeout)
-	defer cancel()
-	// -4 for the same reason as in catalog.go: an IPv6 address is challenged far
-	// more often than an IPv4 one, and a challenge is not retryable.
-	out, err := s.catalog.cmd(ctx, nil, "-j", "-4", "--no-warnings", "--no-progress", "--no-playlist", watchURL)
-	if err != nil {
-		return nil, classifyExtractorError(err)
+	how := "ran"
+	if cached {
+		how = "cached"
 	}
-	var info mediaInfo
-	if err := decodeJSON(out, &info); err != nil {
-		return nil, errf(codeUnavailable, "extractor output is not media info: %v", err)
-	}
+	requestLog(nil, fmt.Sprintf("resolve %s: extraction %s in %s",
+		params.Item.ExternalID, how, s.now().Sub(started).Round(time.Millisecond)), 0, 0)
 	if info.LiveStatus == "is_live" || info.LiveStatus == "is_upcoming" {
 		return nil, errf(codeNotFound, "%s is live or upcoming, which this plugin does not serve", params.Item.ExternalID)
 	}
@@ -169,10 +166,13 @@ func (s *server) resolve(raw json.RawMessage) (any, error) {
 	// into HLS, one playlist per track. Never reached unless the host asked for
 	// it.
 	if modes[modeRemux] && len(plan.inputs()) > 0 {
+		openStarted := s.now()
 		st, err := s.streams.open(ctx, plan.inputs(), startAt, plan.headers)
 		if err != nil {
 			return nil, err
 		}
+		requestLog(nil, fmt.Sprintf("resolve %s: stream ready in %s",
+			params.Item.ExternalID, s.now().Sub(openStarted).Round(time.Millisecond)), 0, 0)
 		return resolveResult{
 			Mode: modeRemux,
 			URL:  s.streams.url(st),
@@ -186,6 +186,68 @@ func (s *server) resolve(raw json.RawMessage) (any, error) {
 	return nil, errf(codeUnsupported,
 		"%s has no single file and this host accepts only %s; it needs a player that merges a video and an audio track (pair) or one that accepts a remuxed stream",
 		params.Item.ExternalID, describeModes(modes))
+}
+
+// extractionTTL is how long one item's extraction stays usable. What it carries
+// are signed urls, good for hours, and the media info that decided the plan; ten
+// minutes keeps a channel switch from extracting the same item again while never
+// being the reason an expired url is tried.
+const extractionTTL = 10 * time.Minute
+
+// extraction is one item's answer, kept for extractionTTL.
+type extraction struct {
+	info mediaInfo
+	at   time.Time
+}
+
+func (s *server) now() time.Time {
+	if s.clock != nil {
+		return s.clock()
+	}
+	return time.Now()
+}
+
+// extract returns the item's media info, running the extractor only when the
+// answer is not already in hand. The second return says which happened, so the
+// cost of a resolve can be read in the log instead of guessed at.
+func (s *server) extract(ctx context.Context, externalID string) (mediaInfo, bool, error) {
+	now := s.now()
+	s.extractMu.Lock()
+	if cached, ok := s.extracts[externalID]; ok && now.Sub(cached.at) < extractionTTL {
+		s.extractMu.Unlock()
+		return cached.info, true, nil
+	}
+	s.extractMu.Unlock()
+
+	watchURL, err := watchURLFor(externalID)
+	if err != nil {
+		return mediaInfo{}, false, err
+	}
+	// -4 for the same reason as in catalog.go: an IPv6 address is challenged far
+	// more often than an IPv4 one, and a challenge is not retryable.
+	out, err := s.catalog.cmd(ctx, nil, "-j", "-4", "--no-warnings", "--no-progress", "--no-playlist", watchURL)
+	if err != nil {
+		return mediaInfo{}, false, classifyExtractorError(err)
+	}
+	var info mediaInfo
+	if err := decodeJSON(out, &info); err != nil {
+		return mediaInfo{}, false, errf(codeUnavailable, "extractor output is not media info: %v", err)
+	}
+
+	s.extractMu.Lock()
+	if s.extracts == nil {
+		s.extracts = map[string]extraction{}
+	}
+	// Bounded without a limit of its own: a stale answer is dropped on every
+	// insert, so the map never holds more than the items resolved inside the ttl.
+	for id, cached := range s.extracts {
+		if now.Sub(cached.at) >= extractionTTL {
+			delete(s.extracts, id)
+		}
+	}
+	s.extracts[externalID] = extraction{info: info, at: now}
+	s.extractMu.Unlock()
+	return info, false, nil
 }
 
 func describeModes(modes modeSet) string {

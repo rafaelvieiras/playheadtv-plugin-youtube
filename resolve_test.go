@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fakeExtractor answers like the real one, from the fixtures in testdata. The
@@ -326,6 +327,40 @@ func TestResolveAsksForWhatTheHostCanPlay(t *testing.T) {
 			t.Errorf("mime = %q, want the master playlist", result.Mime)
 		}
 	})
+}
+
+func TestResolveExtractsAnItemOnce(t *testing.T) {
+	runs := 0
+	cmd := func(ctx context.Context, stdin []byte, args ...string) ([]byte, error) {
+		runs++
+		return os.ReadFile("testdata/media-info.json")
+	}
+	srv := testServer(t, cmd)
+	clockTime := time.Unix(0, 0)
+	srv.clock = func() time.Time { return clockTime }
+	resolve := func() {
+		t.Helper()
+		if _, rpcErr := call(t, srv, "media.resolve", map[string]any{
+			"config": map[string]any{"url": "https://www.youtube.com/channel/example/videos"},
+			"item":   map[string]any{"external_id": "sO_lhW8av3U", "duration_ms": 149000},
+		}); rpcErr != nil {
+			t.Fatalf("resolve: %s", rpcErr.Message)
+		}
+	}
+	// Extraction is seconds of the critical path of a channel switch, so a second
+	// resolve of the same item inside the ttl must not pay for it again.
+	resolve()
+	resolve()
+	if runs != 1 {
+		t.Fatalf("extractor ran %d times for two resolves of one item, want 1", runs)
+	}
+	// Past the ttl the answer is taken again: a url can go stale sooner than it
+	// says it will.
+	clockTime = clockTime.Add(extractionTTL + time.Second)
+	resolve()
+	if runs != 2 {
+		t.Fatalf("extractor ran %d times, want a fresh extraction after the ttl", runs)
+	}
 }
 
 func TestResolveRejectsWhatItCannotServe(t *testing.T) {

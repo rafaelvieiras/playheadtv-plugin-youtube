@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
 const protocolVersion = 1
@@ -85,6 +86,15 @@ type server struct {
 
 	catalog *catalog
 	streams *streams
+
+	// One extraction per item is enough for minutes. It answers with urls, not
+	// media, and running the extractor again costs seconds on the critical path
+	// of a channel that is only being changed.
+	extractMu sync.Mutex
+	extracts  map[string]extraction
+
+	// clock is time.Now outside a test.
+	clock func() time.Time
 }
 
 func main() {
@@ -105,6 +115,8 @@ func main() {
 		manifest: manifest,
 		out:      json.NewEncoder(os.Stdout),
 		catalog:  newCatalog(),
+		extracts: map[string]extraction{},
+		clock:    time.Now,
 	}
 	srv.catalog.init(extractor)
 	if srv.streams, err = newStreams(); err != nil {

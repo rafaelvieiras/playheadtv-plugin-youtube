@@ -74,6 +74,10 @@ const (
 // independently, so the real durations differ per track and that is fine.
 const hlsSegmentSeconds = 6
 
+// hlsFirstSegmentSeconds is the length of the first segment only. It is what
+// bounds how long a tune-in waits for the stream to be readable.
+const hlsFirstSegmentSeconds = 2
+
 // streamReadyTimeout bounds the wait for the first segment. Remuxing starts at
 // the requested offset, so this is "however long the site takes to answer".
 const streamReadyTimeout = 60 * time.Second
@@ -185,8 +189,11 @@ func (s *streams) open(ctx context.Context, inputs []remuxInput, startAt float64
 	// stream have picture and no sound — and a player that follows the audio
 	// clock has nothing to follow. Asking both for the keyframe itself removes
 	// the gap: the audio is cut there too.
+	probeStarted := s.clock()
 	if keyframe, ok := s.keyframeAt(ctx, inputs, startAt, headers); ok {
 		startAt = keyframe
+		requestLog(nil, fmt.Sprintf("stream: keyframe at %.3fs in %s",
+			keyframe, s.clock().Sub(probeStarted).Round(time.Millisecond)), 0, 0)
 	}
 
 	token, err := newToken()
@@ -268,6 +275,10 @@ func (s *streams) start(params streamParams) ([]*process, error) {
 			"-c", "copy",
 			"-f", "hls",
 			"-hls_time", strconv.Itoa(hlsSegmentSeconds),
+			// The first segment is the only one a tune-in waits for, so it is cut
+			// early: a viewer waits two seconds of media for the stream to exist,
+			// not six.
+			"-hls_init_time", strconv.Itoa(hlsFirstSegmentSeconds),
 			// An event playlist: it begins where the host asked and grows to the end
 			// of the item, keeping every segment behind it. A sliding live window
 			// lists one segment at the moment a player opens it, and a player that
