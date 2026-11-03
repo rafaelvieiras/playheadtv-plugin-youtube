@@ -54,8 +54,10 @@ type manifestField struct {
 }
 
 type manifestChoice struct {
-	Value string `json:"value"`
-	Label string `json:"label"`
+	// Value is written into a source's config exactly as declared, so a numeric
+	// setting offers numbers: {"value": 1080, "label": "1080p"}.
+	Value json.RawMessage `json:"value"`
+	Label string          `json:"label"`
 }
 
 type request struct {

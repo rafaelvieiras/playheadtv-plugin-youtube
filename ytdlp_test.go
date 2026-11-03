@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -66,5 +67,35 @@ func TestWithJSRuntimeIsANoopWithoutARuntime(t *testing.T) {
 	}
 	if len(*seen) != 2 || (*seen)[0] != "-j" {
 		t.Fatalf("args = %v, want them untouched", *seen)
+	}
+}
+
+// The manifest that ships is the one this process echoes, so it has to decode
+// into the shape the protocol declares. A declared setting whose value was a
+// string where the field it writes is a number passed every host check and then
+// killed the process at startup.
+func TestTheCheckedInManifestDecodes(t *testing.T) {
+	body, err := os.ReadFile("plugin.json")
+	if err != nil {
+		t.Fatalf("read plugin.json: %v", err)
+	}
+	var manifest Manifest
+	if err := json.Unmarshal(body, &manifest); err != nil {
+		t.Fatalf("plugin.json does not decode into Manifest: %v", err)
+	}
+	if len(manifest.Config) == 0 {
+		t.Fatal("plugin.json declares no settings, but this plugin has config: the screen built from it would be empty")
+	}
+	declared := map[string]string{}
+	for _, f := range manifest.Config {
+		declared[f.Key] = f.Type
+	}
+	for _, key := range []string{"url", "max_height"} {
+		if declared[key] == "" {
+			t.Errorf("plugin.json does not declare %q", key)
+		}
+	}
+	if declared["max_height"] != "choice" {
+		t.Errorf("max_height type = %q, want choice", declared["max_height"])
 	}
 }
