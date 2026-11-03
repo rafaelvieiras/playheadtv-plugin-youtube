@@ -78,18 +78,15 @@ unpack_js_runtime() {
 	chmod 0755 "$stage/deno$ext"
 }
 
+# One description of the plugin: plugin.json as checked in, with the release
+# version and the platform's entrypoint substituted. A second copy in this script
+# drifted once already — every artifact shipped without the settings the plugin
+# declares, and the host had nothing to build a settings screen from.
 manifest() {
-	cat <<EOF
-{
-  "id": "youtube",
-  "name": "YouTube",
-  "description": "Channels, playlists and single videos from YouTube.",
-  "version": "$VERSION",
-  "protocol": 1,
-  "entrypoint": "plugin-youtube$1",
-  "capabilities": ["catalog.list", "media.resolve"]
-}
-EOF
+	sed \
+		-e "s/\"version\": \"[^\"]*\"/\"version\": \"$VERSION\"/" \
+		-e "s/\"entrypoint\": \"[^\"]*\"/\"entrypoint\": \"plugin-youtube$1\"/" \
+		"$(dirname "$0")/plugin.json"
 }
 
 artifacts=""
