@@ -219,10 +219,8 @@ func (s *streams) start(params streamParams) ([]*process, error) {
 	var procs []*process
 	for _, in := range params.inputs {
 		variant := videoVariant
-		streamIndex := 0
 		if in.selector == "a" {
 			variant = audioVariant
-			streamIndex = 1
 		}
 		if err := os.MkdirAll(filepath.Join(dir, variant), 0o700); err != nil {
 			stopAll(procs)
@@ -236,7 +234,8 @@ func (s *streams) start(params streamParams) ([]*process, error) {
 		}
 		args = append(args,
 			"-i", in.url,
-			"-map", fmt.Sprintf("%d:%s:0", streamIndex, in.selector),
+			// One input per process, so the map always addresses input 0.
+			"-map", fmt.Sprintf("0:%s:0", in.selector),
 			"-c", "copy",
 			"-f", "hls",
 			"-hls_time", strconv.Itoa(hlsSegmentSeconds),
