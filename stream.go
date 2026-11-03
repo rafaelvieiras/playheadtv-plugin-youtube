@@ -198,15 +198,22 @@ func (s *streams) open(ctx context.Context, inputs []remuxInput, startAt float64
 		params:  streamParams{inputs: inputs, startAt: startAt, headers: headers},
 		lastUse: s.clock(),
 	}
-	procs, err := s.start(st.params)
-	if err != nil && refusedByTheSource(err) {
-		// A refusal is not a verdict. The source answers 403 for a freshly
-		// resolved url on one of its nodes and serves the very same url on the
-		// next request (measured: the url it had just refused opened five seconds
-		// later, from the same machine and the same address). From here the two
-		// look identical, so one more try is what tells them apart, and it costs
-		// a second instead of an item the channel then skips.
+	var procs []*process
+	for attempt := 0; attempt < refusedReadAttempts; attempt++ {
+		if attempt > 0 {
+			// A refusal is not a verdict. The source answers 403 for a freshly
+			// resolved url on one of its nodes and serves the very same url a few
+			// seconds later (measured: the url it had just refused opened five
+			// seconds after, from the same machine and the same address). From
+			// here the two look identical, so trying again tells them apart — and
+			// the pause is the load-bearing part: retrying at once hits the same
+			// node and is refused again.
+			time.Sleep(refusedReadPause)
+		}
 		procs, err = s.start(st.params)
+		if err == nil || !refusedByTheSource(err) {
+			break
+		}
 	}
 	if err != nil {
 		return nil, err
@@ -309,6 +316,14 @@ func (s *streams) start(params streamParams) ([]*process, error) {
 	}
 	return procs, nil
 }
+
+// How a refused first read is retried before it counts as the item's problem.
+// Two pauses of two seconds stay well inside the resolve budget the host allows
+// and cover the window in which the source was measured to answer differently.
+const (
+	refusedReadAttempts = 3
+	refusedReadPause    = 2 * time.Second
+)
 
 // refusedByTheSource reports a failure the source answered with a refusal, rather
 // than one that says the item itself cannot be played.
