@@ -40,23 +40,25 @@ const (
 	modeRemux  = "remux"  // the plugin assembles a stream itself
 )
 
-type modeSet map[string]bool
-
-func resolveModes(requested []string) modeSet {
-	set := modeSet{}
+// resolveModes is the host's order of preference, without duplicates or names
+// this plugin does not know. Absent means the two modes that need no processing
+// here, single first (the smallest number of moving parts).
+func resolveModes(requested []string) []string {
 	if len(requested) == 0 {
-		// No request means the two modes that need no processing here.
-		set[modeSingle] = true
-		set[modePair] = true
-		return set
+		return []string{modeSingle, modePair}
 	}
+	seen := map[string]bool{}
+	modes := make([]string, 0, len(requested))
 	for _, m := range requested {
 		switch m {
 		case modeSingle, modePair, modeRemux:
-			set[m] = true
+			if !seen[m] {
+				seen[m] = true
+				modes = append(modes, m)
+			}
 		}
 	}
-	return set
+	return modes
 }
 
 type resolveResult struct {
@@ -145,47 +147,58 @@ func (s *server) resolve(raw json.RawMessage) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	modes := resolveModes(params.Modes)
 	startAt := float64(params.StartAtMS) / 1000
 
-	// Best case, and free: the source already has a file with both tracks. The
-	// player fetches it from the source itself and seeks with a range request.
-	if plan.direct != nil && modes[modeSingle] {
-		res := directResult(*plan.direct)
-		res.Mode = modeSingle
-		return res, nil
-	}
+	// The host's order is a preference, not a set: it says which shape its player
+	// would rather open (docs/PLUGINS.md "Modes"). Honouring it is what lets a
+	// host choose between the best picture (`pair`, free, but only for a player
+	// that merges) and the smallest number of moving parts (`single`), which is
+	// not always the same thing: on this source `single` is a muxed file capped
+	// below the separated video track.
+	askModes := resolveModes(params.Modes)
+	for _, mode := range askModes {
+		switch mode {
+		case modeSingle:
+			if plan.direct == nil {
+				continue
+			}
+			res := directResult(*plan.direct)
+			res.Mode = modeSingle
+			return res, nil
 
-	// Next best, also free: two files the player merges itself. Nothing is
-	// downloaded, remuxed or served here.
-	if plan.video != nil && plan.audio != nil && modes[modePair] {
-		return pairResult(*plan.video, *plan.audio, plan.headers), nil
-	}
+		case modePair:
+			if plan.video == nil || plan.audio == nil {
+				continue
+			}
+			return pairResult(*plan.video, *plan.audio, plan.headers), nil
 
-	// The fallback, and the only mode where this process touches media: remux
-	// into HLS, one playlist per track. Never reached unless the host asked for
-	// it.
-	if modes[modeRemux] && len(plan.inputs()) > 0 {
-		openStarted := s.now()
-		st, err := s.streams.open(ctx, plan.inputs(), startAt, plan.headers)
-		if err != nil {
-			return nil, err
+		case modeRemux:
+			// The only mode where this process touches media: remux into HLS, one
+			// playlist per track. Never reached unless the host asked for it.
+			if len(plan.inputs()) == 0 {
+				continue
+			}
+			openStarted := s.now()
+			st, err := s.streams.open(ctx, plan.inputs(), startAt, plan.headers)
+			if err != nil {
+				return nil, err
+			}
+			requestLog(nil, fmt.Sprintf("resolve %s: stream ready in %s",
+				params.Item.ExternalID, s.now().Sub(openStarted).Round(time.Millisecond)), 0, 0)
+			return resolveResult{
+				Mode: modeRemux,
+				URL:  s.streams.url(st),
+				Mime: "application/vnd.apple.mpegurl",
+				// A playlist that grows to the end of the item, with one variant per
+				// track.
+				Live: true,
+			}, nil
 		}
-		requestLog(nil, fmt.Sprintf("resolve %s: stream ready in %s",
-			params.Item.ExternalID, s.now().Sub(openStarted).Round(time.Millisecond)), 0, 0)
-		return resolveResult{
-			Mode: modeRemux,
-			URL:  s.streams.url(st),
-			Mime: "application/vnd.apple.mpegurl",
-			// A playlist that grows to the end of the item, with one variant per
-			// track.
-			Live: true,
-		}, nil
 	}
 
 	return nil, errf(codeUnsupported,
-		"%s has no single file and this host accepts only %s; it needs a player that merges a video and an audio track (pair) or one that accepts a remuxed stream",
-		params.Item.ExternalID, describeModes(modes))
+		"%s cannot be served in any mode this host accepts (%s); it needs a player that merges a video and an audio track (pair) or one that accepts a remuxed stream",
+		params.Item.ExternalID, describeModes(askModes))
 }
 
 // extractionTTL is how long one item's extraction stays usable. What it carries
@@ -250,17 +263,11 @@ func (s *server) extract(ctx context.Context, externalID string) (mediaInfo, boo
 	return info, false, nil
 }
 
-func describeModes(modes modeSet) string {
-	names := make([]string, 0, len(modes))
-	for _, m := range []string{modeSingle, modePair, modeRemux} {
-		if modes[m] {
-			names = append(names, m)
-		}
-	}
-	if len(names) == 0 {
+func describeModes(modes []string) string {
+	if len(modes) == 0 {
 		return "no mode"
 	}
-	return strings.Join(names, "+")
+	return strings.Join(modes, "+")
 }
 
 func pairResult(video, audio mediaFormat, fallback map[string]string) resolveResult {

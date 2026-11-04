@@ -231,6 +231,37 @@ func TestResolveAsksForWhatTheHostCanPlay(t *testing.T) {
 		}
 	})
 
+	t.Run("the host's order decides, not ours", func(t *testing.T) {
+		// A muxed file exists, but the host asked for a pair first: it merges one
+		// itself and would rather not take the muxed file this source caps below
+		// the separated video track.
+		srv := testServer(t, fakeExtractor("testdata/channel-listing.json", nil))
+		srv.catalog.cmd = func(ctx context.Context, stdin []byte, args ...string) ([]byte, error) {
+			return []byte(`{"id":"x","duration":10,"formats":[
+				{"format_id":"18","ext":"mp4","vcodec":"avc1","acodec":"mp4a","height":360,"tbr":500,"protocol":"https","url":"https://cdn.example.test/18?expire=1793602656"},
+				{"format_id":"137","ext":"mp4","vcodec":"avc1","acodec":"none","height":1080,"tbr":4400,"protocol":"https","url":"https://cdn.example.test/137?expire=1793602656"},
+				{"format_id":"140","ext":"m4a","vcodec":"none","acodec":"mp4a","abr":129,"protocol":"https","url":"https://cdn.example.test/140?expire=1793602656"}]}`), nil
+		}
+		body, rpcErr := call(t, srv, "media.resolve", map[string]any{
+			"config": config,
+			"item":   map[string]any{"external_id": "sO_lhW8av3U"},
+			"modes":  []string{"pair", "single"},
+		})
+		if rpcErr != nil {
+			t.Fatalf("resolve: %s", rpcErr.Message)
+		}
+		var result resolveResult
+		if err := json.Unmarshal(body, &result); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if result.Mode != modePair {
+			t.Fatalf("mode = %q, want %q: that is the order the host asked in", result.Mode, modePair)
+		}
+		if !strings.Contains(result.Sources[0].URL, "/137") {
+			t.Errorf("video url = %q, want the separated 1080p track", result.Sources[0].URL)
+		}
+	})
+
 	t.Run("pair-only host is refused, not remuxed", func(t *testing.T) {
 		srv := testServer(t, fakeExtractor("testdata/channel-listing.json", nil))
 		_, rpcErr := call(t, srv, "media.resolve", map[string]any{
