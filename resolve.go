@@ -196,6 +196,17 @@ func (s *server) resolve(raw json.RawMessage) (any, error) {
 		}
 	}
 
+	// Nothing the host asked for can be produced, but a muxed file plays in any
+	// player: answer it rather than leaving the item unplayable. A host that asks
+	// for `pair,remux` and means "best picture", falling back only when the source
+	// has no separate tracks, is the case this exists for.
+	if plan.direct != nil {
+		requestLog(nil, fmt.Sprintf("resolve %s: %s not available, answered single",
+			params.Item.ExternalID, describeModes(askModes)), 0, 0)
+		res := directResult(*plan.direct)
+		res.Mode = modeSingle
+		return res, nil
+	}
 	return nil, errf(codeUnsupported,
 		"%s cannot be served in any mode this host accepts (%s); it needs a player that merges a video and an audio track (pair) or one that accepts a remuxed stream",
 		params.Item.ExternalID, describeModes(askModes))
@@ -348,7 +359,7 @@ func planPlayback(info mediaInfo, cfg sourceConfig) (playbackPlan, error) {
 	// the same item's separate tracks were right there.
 	video := bestVideo(info.Formats, maxHeight)
 	audio := bestAudio(info.Formats)
-	plan := playbackPlan{direct: bestMuxed(info.Formats), video: video, audio: audio, headers: headers}
+	plan := playbackPlan{direct: bestMuxed(info.Formats, maxHeight), video: video, audio: audio, headers: headers}
 	if video != nil && audio != nil {
 		plan.headers = pickHeaders(video, audio, headers)
 	}
@@ -378,11 +389,26 @@ func usable(f mediaFormat) bool {
 	return false
 }
 
-func bestMuxed(formats []mediaFormat) *mediaFormat {
+// bestMuxed is the one file a player that cannot merge can still open, capped
+// like the separated tracks: a streamed channel should not pull 1080p because the
+// only muxed format happens to be that tall while the cap says 480.
+func bestMuxed(formats []mediaFormat, maxHeight int) *mediaFormat {
+	if best := tallestMuxed(formats, maxHeight); best != nil {
+		return best
+	}
+	// Nothing under the cap: a file above it still plays, and an item that plays
+	// beats an item that honours a soft cap.
+	return tallestMuxed(formats, 0)
+}
+
+func tallestMuxed(formats []mediaFormat, maxHeight int) *mediaFormat {
 	var best *mediaFormat
 	for i := range formats {
 		f := formats[i]
 		if !usable(f) || !hasVideo(f) || !hasAudio(f) {
+			continue
+		}
+		if maxHeight > 0 && f.Height > maxHeight {
 			continue
 		}
 		if best == nil || betterMuxed(f, *best) {

@@ -204,6 +204,45 @@ func TestResolveAsksForWhatTheHostCanPlay(t *testing.T) {
 		}
 	})
 
+	t.Run("a host that asks for a pair and a remux still gets the muxed file", func(t *testing.T) {
+		srv := testServer(t, fakeExtractor("testdata/channel-listing.json", nil))
+		srv.catalog.cmd = func(ctx context.Context, stdin []byte, args ...string) ([]byte, error) {
+			// The item has one progressive format and no separate tracks: a host
+			// that means "best picture" must not be left with nothing.
+			return []byte(`{"id":"x","duration":10,"formats":[
+				{"format_id":"18","ext":"mp4","vcodec":"avc1","acodec":"mp4a","height":360,"tbr":500,"protocol":"https","url":"https://cdn.example.test/18?expire=1793602656"}]}`), nil
+		}
+		body, rpcErr := call(t, srv, "media.resolve", map[string]any{
+			"config": config,
+			"item":   map[string]any{"external_id": "sO_lhW8av3U"},
+			"modes":  []string{"pair", "remux"},
+		})
+		if rpcErr != nil {
+			t.Fatalf("resolve: %s", rpcErr.Message)
+		}
+		var result resolveResult
+		if err := json.Unmarshal(body, &result); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if result.Mode != modeSingle || !strings.Contains(result.URL, "cdn.example.test/18") {
+			t.Fatalf("result = %+v, want the muxed file as a last resort", result)
+		}
+	})
+
+	t.Run("the muxed file honours the height cap", func(t *testing.T) {
+		formats := []mediaFormat{
+			{FormatID: "18", VCodec: "avc1", ACodec: "mp4a", Height: 360, TBR: 500, Protocol: "https", URL: "https://cdn.example.test/18"},
+			{FormatID: "22", VCodec: "avc1", ACodec: "mp4a", Height: 720, TBR: 2000, Protocol: "https", URL: "https://cdn.example.test/22"},
+		}
+		if got := bestMuxed(formats, 480); got == nil || got.FormatID != "18" {
+			t.Fatalf("bestMuxed(480) = %+v, want the 360 file", got)
+		}
+		// Nothing under the cap: the taller file still plays.
+		if got := bestMuxed(formats[1:], 480); got == nil || got.FormatID != "22" {
+			t.Fatalf("bestMuxed(480) over a 720-only set = %+v, want it anyway", got)
+		}
+	})
+
 	t.Run("capable host still prefers a single file", func(t *testing.T) {
 		srv := testServer(t, fakeExtractor("testdata/channel-listing.json", nil))
 		srv.catalog.cmd = func(ctx context.Context, stdin []byte, args ...string) ([]byte, error) {
